@@ -13,6 +13,7 @@ from app.db.database import health as db_health
 from app.services.analytics import analytics_service
 from app.services.saby import saby_client
 from app.services.sync import sync_service
+from app.services.shift_engine import shift_engine
 
 
 router = Router()
@@ -52,7 +53,9 @@ async def start(message: Message) -> None:
         "• история смен продавцов.\n\n"
         "Диагностика: /db\n"
         "Ручная синхронизация: /sync 3\n"
-        "Смены: /shifts вчера\n\n"
+        "Смены: /shifts вчера\n"
+        "Диагностика смен: /shiftdebug вчера\n"
+        "Пересборка смен: /rebuildshifts 4\n\n"
         "Можно писать обычным языком:\n"
         "«Как вчера отработала сеть?»\n"
         "«Кто работал ночью вчера?»\n"
@@ -207,6 +210,56 @@ async def shifts(message: Message) -> None:
     except Exception as exc:
         logger.exception("Shift report failed")
         await message.answer(f"⚠️ Ошибка:\n{exc}")
+
+
+@router.message(Command("shiftdebug"))
+async def shift_debug(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message); return
+    parts=(message.text or "").split(maxsplit=1)
+    date_value=parts[1] if len(parts)>1 else "вчера"
+    try:
+        data=await analytics_service.shift_diagnostics(date_value)
+        t=data['totals']
+        lines=[f"🔎 Shift debug: {data['date']}",f"TZ: {data['timezone']}","",
+               f"Продаж: {t['sales_total']}",f"Seller ID: {t['with_seller_id']}",
+               f"SellerName: {t['with_seller_name']}",f"Без Seller: {t['without_seller']}",
+               f"Teller: {t['with_teller']}",f"Shift ID: {t['with_shift_id']}",
+               f"ShiftNumber: {t['with_shift_number']}",
+               f"Уникальных Seller ID: {t['unique_seller_ids']}",
+               f"Уникальных SellerName: {t['unique_seller_names']}","","По магазинам:"]
+        for r in data['by_store']:
+            lines.append(f"• {r['store']}: {r['sales']} чек.; SellerID {r['with_seller_id']}; Name {r['with_seller_name']}; Shift {r['with_shift']}")
+        lines.append("\nСмены в БД по рабочим датам:")
+        if data['shift_dates']:
+            for r in data['shift_dates']:
+                lines.append(f"• {r['work_date']}: {r['shifts']} (A {r['auto']} / R {r['review']} / X {r['ambiguous']})")
+        else:
+            lines.append('• нет')
+        text='\n'.join(lines)
+        for i in range(0,len(text),3900):
+            await message.answer(text[i:i+3900])
+    except Exception as exc:
+        logger.exception('Shift debug failed'); await message.answer(f"⚠️ Shift debug error:\n{exc}")
+
+@router.message(Command("rebuildshifts"))
+async def rebuild_shifts(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message); return
+    parts=(message.text or '').split(); days=4
+    if len(parts)>1:
+        try: days=max(1,min(int(parts[1]),60))
+        except ValueError:
+            await message.answer('Формат: /rebuildshifts 4'); return
+    try:
+        from datetime import datetime,timedelta
+        from zoneinfo import ZoneInfo
+        today=datetime.now(ZoneInfo(settings.business_tz)).date()
+        date_from=today-timedelta(days=days-1)
+        count=await shift_engine.rebuild_range(date_from,today)
+        await message.answer(f"✅ ShiftEngine пересобран\n\nПериод: {date_from.isoformat()} → {today.isoformat()}\nСмен: {count}")
+    except Exception as exc:
+        logger.exception('Shift rebuild failed'); await message.answer(f"⚠️ Shift rebuild error:\n{exc}")
 
 
 @router.message(F.text)

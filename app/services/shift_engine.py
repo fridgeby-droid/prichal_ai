@@ -32,6 +32,14 @@ class SaleEvent:
             return f"id:{self.seller_id}"
         return "name:" + " ".join(self.seller_name.casefold().split())
 
+    @property
+    def display_name(self) -> str:
+        if self.seller_name.strip():
+            return self.seller_name.strip()
+        if self.seller_id is not None:
+            return f"Seller #{self.seller_id}"
+        return "Продавец не определён"
+
 
 @dataclass(slots=True)
 class ShiftResult:
@@ -150,7 +158,7 @@ class ShiftEngine:
             shift_type=shift_type,
             seller_key=first.seller_key,
             seller_id=first.seller_id,
-            seller_name=first.seller_name,
+            seller_name=first.display_name,
             started_at=started,
             ended_at=ended,
             check_count=len(events),
@@ -181,8 +189,9 @@ class ShiftEngine:
                 WHERE deleted=FALSE
                   AND sale_datetime >= $1
                   AND sale_datetime < $2
-                  AND seller_name <> ''
-                ORDER BY point_id, seller_name, sale_datetime
+                  AND (seller_id IS NOT NULL OR seller_name <> '')
+                  AND sale_datetime IS NOT NULL
+                ORDER BY point_id, COALESCE(CAST(seller_id AS TEXT), seller_name), sale_datetime
                 """,
                 datetime.combine(query_from, datetime.min.time(), tzinfo=self._tz()),
                 datetime.combine(query_to, datetime.min.time(), tzinfo=self._tz()),

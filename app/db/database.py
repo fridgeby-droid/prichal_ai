@@ -46,6 +46,9 @@ async def init_db() -> None:
         min_size=1,
         max_size=5,
         command_timeout=90,
+        server_settings={
+            "timezone": settings.business_tz,
+        },
     )
 
     schema_path = Path(__file__).with_name("schema.sql")
