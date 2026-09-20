@@ -606,10 +606,11 @@ class ShiftEngine:
                     seller_id=row["seller_id"],
                     seller_name=row["seller_name"] or "",
 
-                    # signed_amount is already signed in payment ledger.
-                    # SaleEvent.is_return=False prevents a second inversion.
+                    # Preserve the sign from payment ledger.  The common
+                    # helper applies abs(), so mark negative ledger rows as
+                    # returns to keep them negative inside shift revenue.
                     amount=signed_amount,
-                    is_return=False,
+                    is_return=(signed_amount < 0),
 
                     saby_shift_id=row["saby_shift_id"],
                     saby_shift_number=(

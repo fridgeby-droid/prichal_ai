@@ -45,7 +45,7 @@ async def start(message: Message) -> None:
         return
 
     await message.answer(
-        "Причал AI v0.2.8 Diagnostic ✅\n\n"
+        "Причал AI v0.2.9 Adaptive Sync ✅\n\n"
         "Добавлено:\n"
         "• Neon/PostgreSQL;\n"
         "• история Saby;\n"

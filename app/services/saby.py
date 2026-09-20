@@ -162,22 +162,30 @@ class SabyClient:
         need_discount_info: bool = True,
     ) -> list[dict[str, Any]]:
         """
-        Saby documents page/pageSize for retail/order/list but does not expose
-        a documented hasMore flag for this method. Some accounts can return
-        a full repeated page instead of a short terminal page.
+        Complete calendar-day fetch without trusting Saby page traversal.
 
-        Therefore pagination is guarded by:
-        1) empty page;
-        2) short page;
-        3) repeated page signature;
-        4) zero new Sale/Key identifiers.
+        retail/order/list documents page/pageSize but does not document a
+        hasMore marker for this method. In this account page traversal has
+        produced repeated/full pages and could either loop or truncate data.
+
+        Strategy:
+        - request page=0, pageSize=100 for a time window;
+        - if <100 rows, the window is complete;
+        - if exactly 100 rows, split the TIME window in half and recurse;
+        - deduplicate by Sale/Key after all slices are fetched.
+
+        This makes completeness depend on fromDateTime/toDateTime filtering,
+        not on ambiguous page behavior.
         """
-        day = self.resolve_date(date_value)
+        day = datetime.strptime(self.resolve_date(date_value), "%Y-%m-%d")
+        start_dt = day.replace(hour=0, minute=0, second=0)
+        end_dt = day.replace(hour=23, minute=59, second=59)
         page_size = 100
-        result: list[dict[str, Any]] = []
+        min_window_seconds = 60
+        max_depth = 16
 
-        seen_ids: set[str] = set()
-        seen_signatures: set[tuple[str, ...]] = set()
+        def fmt(dt: datetime) -> str:
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
 
         def order_key(order: dict[str, Any], index: int) -> str:
             sale = order.get("Sale")
@@ -192,58 +200,99 @@ class SabyClient:
             date_wtz = str(order.get("DateWTZ") or "").strip()
             return f"fallback:{number}:{date_wtz}:{index}"
 
-        for page in range(self.settings.saby_max_pages_per_point):
+        async def fetch_window(
+            window_start: datetime,
+            window_end: datetime,
+            depth: int = 0,
+        ) -> list[dict[str, Any]]:
             data = await self._get(
                 "/retail/order/list",
                 {
                     "pointId": point_id,
-                    "fromDateTime": f"{day} 00:00:00",
-                    "toDateTime": f"{day} 23:59:59",
-                    "page": page,
+                    "fromDateTime": fmt(window_start),
+                    "toDateTime": fmt(window_end),
+                    "page": 0,
                     "pageSize": page_size,
                     "needDiscountInfo": str(need_discount_info).lower(),
                 },
             )
 
             orders = data.get("orders") or []
-            if not isinstance(orders, list) or not orders:
-                break
+            if not isinstance(orders, list):
+                return []
 
-            page_keys = [
-                order_key(order, index)
-                for index, order in enumerate(orders)
-            ]
-
-            # Signature of the entire page is the strongest protection
-            # against an API endpoint that ignores/loops the page number.
-            signature = tuple(page_keys)
-            if signature in seen_signatures:
-                break
-            seen_signatures.add(signature)
-
-            new_orders: list[dict[str, Any]] = []
-            for index, order in enumerate(orders):
-                key = page_keys[index]
-                if key in seen_ids:
-                    continue
-                seen_ids.add(key)
-                new_orders.append(order)
-
-            # A full page containing no new sales means pagination loop.
-            if not new_orders:
-                break
-
-            result.extend(new_orders)
-
-            # Normal terminal condition.
             if len(orders) < page_size:
-                break
+                return orders
 
-            # Partial overlap usually means data changed while paging.
-            # Continue only while at least one genuinely new sale arrived.
-            if len(new_orders) < len(orders):
+            window_seconds = int((window_end - window_start).total_seconds())
+            if depth >= max_depth or window_seconds <= min_window_seconds:
+                # Extremely dense interval. At this point use guarded page
+                # traversal only inside the tiny slice.
+                result: list[dict[str, Any]] = []
+                seen: set[str] = set()
+                seen_signatures: set[tuple[str, ...]] = set()
+
+                for page in range(self.settings.saby_max_pages_per_point):
+                    page_data = await self._get(
+                        "/retail/order/list",
+                        {
+                            "pointId": point_id,
+                            "fromDateTime": fmt(window_start),
+                            "toDateTime": fmt(window_end),
+                            "page": page,
+                            "pageSize": page_size,
+                            "needDiscountInfo": str(need_discount_info).lower(),
+                        },
+                    )
+                    page_orders = page_data.get("orders") or []
+                    if not isinstance(page_orders, list) or not page_orders:
+                        break
+
+                    keys = tuple(
+                        order_key(order, idx)
+                        for idx, order in enumerate(page_orders)
+                    )
+                    if keys in seen_signatures:
+                        break
+                    seen_signatures.add(keys)
+
+                    new_count = 0
+                    for idx, order in enumerate(page_orders):
+                        key = order_key(order, idx)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        result.append(order)
+                        new_count += 1
+
+                    if len(page_orders) < page_size or new_count == 0:
+                        break
+
+                return result
+
+            # Inclusive API bounds: make the two halves non-overlapping.
+            midpoint = window_start + (window_end - window_start) / 2
+            midpoint = midpoint.replace(microsecond=0)
+            right_start = midpoint + timedelta(seconds=1)
+
+            left, right = await asyncio.gather(
+                fetch_window(window_start, midpoint, depth + 1),
+                fetch_window(right_start, window_end, depth + 1),
+            )
+            return left + right
+
+        raw_orders = await fetch_window(start_dt, end_dt)
+
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for idx, order in enumerate(raw_orders):
+            key = order_key(order, idx)
+            if key in seen:
                 continue
+            seen.add(key)
+            result.append(order)
 
+        result.sort(key=lambda order: str(order.get("DateWTZ") or ""))
         return result
 
 
