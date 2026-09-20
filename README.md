@@ -1,69 +1,63 @@
-# Причал AI v0.2.6 — Business Day Engine
+# Причал AI v0.2.7 — Payment Ledger
 
-Главное изменение: Причал больше не использует календарные сутки Saby
-как основную управленческую дату.
+Исправляет источник выручки смен.
 
-## Business day
+## Почему v0.2.6 могла считать смены неверно
 
-`2026-09-19`:
+Saby `retail/order/list` возвращает:
 
-- начало: 19.09 08:00
-- конец: 20.09 07:59:59
+- `TotalPrice` — сумму ПРОДАЖИ;
+- `Payments[]` — массив платежей/чеков;
+- у каждого Payments:
+  - `Amount` — сумма платежа;
+  - `CarriedWTZ` — когда пробит чек;
+  - `Shift`;
+  - `ShiftNumber`;
+  - `Teller`.
 
-Внутри:
+В v0.2.6 вся `TotalPrice` продажи привязывалась к одному check timestamp.
+Если в продаже больше одного `Payments`, это неправильно для сменной выручки.
 
-- DAY = 08:00–19:59
-- NIGHT = 20:00–07:59 следующего дня
+## v0.2.7
 
-Настройка:
+Добавлена таблица:
 
-```env
-BUSINESS_DAY_START_HOUR=8
-```
+` sale_payments `
 
-## Три уровня смен
+Одна строка = один Saby Payments[] record.
 
-### RAW sales
+Именно она теперь является денежным и временным источником для ShiftEngine.
 
-Каждый чек хранит:
+### Shift revenue
 
-- `Payments.CarriedWTZ`
-- `business_date`
-- `business_shift_type`
-- Seller
-- Shift / ShiftNumber
-- сумму
-- возврат
+`SUM(sale_payments.signed_amount)`
 
-### cash_shifts
+где:
+- обычная продажа: `Amount`;
+- возврат: `-ABS(Amount)`.
 
-Фактические кассовые сегменты Saby.
+Если Saby не вернул Payments, создаётся явный
+`source=sale_total_fallback`, который будет виден в `/reconcile`.
 
-### employee_work_shifts
+## Business day сохраняется
 
-Рабочая/оплачиваемая смена сотрудника.
+Например 19.09:
 
-Несколько cash shifts одного сотрудника внутри одного DAY/NIGHT могут
-объединяться в одну work shift.
+19.09 08:00 → 20.09 07:59:59.
 
-Настройка:
+## Рекомендуемый чистый rebuild
 
-```env
-WORK_SHIFT_MERGE_GAP_HOURS=4
-```
-
-## Clean rebuild
-
-Для первой установки v0.2.6 рекомендуется чистый rebuild.
-
-ВАЖНО: временно отключите автоматическую синхронизацию:
+Перед деплоем:
 
 ```env
 AUTO_SYNC_ENABLED=false
 AUTO_SYNC_ON_START=false
+BUSINESS_DAY_START_HOUR=8
+SYNC_CONCURRENCY=4
+SABY_MAX_PAGES_PER_POINT=30
 ```
 
-Задеплойте v0.2.6 и выполните:
+После деплоя:
 
 ```text
 /resetdata confirm
@@ -75,60 +69,33 @@ AUTO_SYNC_ON_START=false
 /sync 7
 ```
 
-После загрузки:
+После sync ShiftEngine пересобирается автоматически.
+Дополнительно можно выполнить:
 
 ```text
 /rebuildshifts 7
 ```
 
-Затем:
+Проверка:
 
 ```text
+/shiftdebug вчера
 /reconcile вчера
-```
-
-и:
-
-```text
 /shifts вчера
 ```
 
-После успешной проверки можно снова включить auto sync.
+## Что показывает reconcile
 
-## Reconciliation
+Три уровня:
 
-`/reconcile вчера`
+1. `Sale TotalPrice`
+2. `Payments`
+3. `Employee work shifts`
 
-Для каждого магазина проверяет:
+Критическая проверка для зарплаты:
 
-RAW business-day revenue
-=
-SUM(employee work shifts revenue)
+`Payments − Shifts = 0`
 
-и:
-
-RAW check count
-=
-SUM(employee work shift check_count)
-
-Если есть:
-- денежная разница;
-- потерянные чеки;
-- чеки без Seller;
-- REVIEW shifts;
-
-статус магазина = REVIEW.
-
-До PayrollEngine используем только даты со статусом OK.
-
-## Reset safety
-
-`/resetdata confirm` удаляет только:
-
-- Saby raw sales/items;
-- cash shifts;
-- employee work shifts;
-- sync history;
-- stores Saby.
-
-Причал Core и его БД не затрагиваются.
+`Sale − Payments` отображается отдельно как диагностическая разница:
+она помогает понять особенности данных Saby и не блокирует сама по себе
+расчёт смен, если payment ledger полностью согласован с shifts.

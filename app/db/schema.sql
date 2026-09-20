@@ -83,6 +83,73 @@ CREATE INDEX IF NOT EXISTS idx_sales_point_business_date
 CREATE INDEX IF NOT EXISTS idx_sales_seller_business_date
     ON sales(seller_id, business_date);
 
+
+-- Payment/check ledger.
+-- This is the source of truth for shift revenue.
+-- One row = one Saby Payments[] record (fiscal/nonfiscal payment/check).
+CREATE TABLE IF NOT EXISTS sale_payments (
+    point_id BIGINT NOT NULL,
+    sale_id BIGINT NOT NULL,
+
+    payment_key TEXT NOT NULL,
+
+    payment_id BIGINT,
+    check_number TEXT NOT NULL DEFAULT '',
+
+    carried_at TIMESTAMPTZ,
+    opened_at TIMESTAMPTZ,
+    closed_at TIMESTAMPTZ,
+
+    business_date DATE,
+    business_shift_type TEXT
+        CHECK (
+            business_shift_type IS NULL
+            OR business_shift_type IN ('DAY', 'NIGHT')
+        ),
+
+    seller_id BIGINT,
+    seller_name TEXT NOT NULL DEFAULT '',
+
+    saby_shift_id BIGINT,
+    saby_shift_number TEXT NOT NULL DEFAULT '',
+    teller_id BIGINT,
+
+    amount NUMERIC(18, 4) NOT NULL DEFAULT 0,
+    signed_amount NUMERIC(18, 4) NOT NULL DEFAULT 0,
+
+    cash_sum NUMERIC(18, 4) NOT NULL DEFAULT 0,
+    bank_sum NUMERIC(18, 4) NOT NULL DEFAULT 0,
+    certificate_sum NUMERIC(18, 4) NOT NULL DEFAULT 0,
+    salary_sum NUMERIC(18, 4) NOT NULL DEFAULT 0,
+
+    nonfiscal BOOLEAN NOT NULL DEFAULT FALSE,
+    is_return BOOLEAN NOT NULL DEFAULT FALSE,
+
+    source TEXT NOT NULL DEFAULT 'saby_payment',
+
+    raw_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    PRIMARY KEY (point_id, sale_id, payment_key),
+
+    FOREIGN KEY (point_id, sale_id)
+        REFERENCES sales(point_id, sale_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_sale_payments_business_date
+    ON sale_payments(business_date);
+
+CREATE INDEX IF NOT EXISTS idx_sale_payments_point_business_date
+    ON sale_payments(point_id, business_date);
+
+CREATE INDEX IF NOT EXISTS idx_sale_payments_shift
+    ON sale_payments(saby_shift_id, business_date);
+
+CREATE INDEX IF NOT EXISTS idx_sale_payments_seller
+    ON sale_payments(seller_id, business_date);
+
+
 CREATE TABLE IF NOT EXISTS sale_items (
     point_id BIGINT NOT NULL,
     sale_id BIGINT NOT NULL,

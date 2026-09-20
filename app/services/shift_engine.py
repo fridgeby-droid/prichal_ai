@@ -524,51 +524,65 @@ class ShiftEngine:
 
         return result
 
+
     async def rebuild_range(
         self,
         date_from: date,
         date_to: date,
     ) -> int:
+        """
+        Builds shifts from payment/check facts, not sale totals.
+
+        One Sale can contain multiple Payments. Each payment has its own
+        CarriedWTZ / Amount / Shift / Teller and must be attributed
+        independently.
+        """
         async with pool().acquire() as conn:
             rows = await conn.fetch(
                 """
                 SELECT
-                    point_id,
-                    sale_id,
-                    business_date,
-                    business_shift_type,
-                    sale_datetime,
+                    p.point_id,
+                    p.sale_id,
+                    p.business_date,
+                    p.business_shift_type,
+                    p.carried_at,
 
-                    seller_id,
-                    seller_name,
+                    p.seller_id,
+                    p.seller_name,
 
-                    total_price,
-                    is_return,
+                    p.signed_amount,
 
-                    saby_shift_id,
-                    saby_shift_number
+                    p.saby_shift_id,
+                    p.saby_shift_number,
 
-                FROM sales
+                    p.payment_key
 
-                WHERE deleted=FALSE
+                FROM sale_payments p
 
-                  AND business_date
+                JOIN sales s
+                  ON s.point_id=p.point_id
+                 AND s.sale_id=p.sale_id
+
+                WHERE s.deleted=FALSE
+
+                  AND p.business_date
                       BETWEEN $1 AND $2
 
-                  AND sale_datetime IS NOT NULL
+                  AND p.carried_at IS NOT NULL
 
-                  AND business_shift_type
+                  AND p.business_shift_type
                       IN ('DAY', 'NIGHT')
 
                   AND (
-                      seller_id IS NOT NULL
-                      OR seller_name <> ''
+                      p.seller_id IS NOT NULL
+                      OR p.seller_name <> ''
                   )
 
                 ORDER BY
-                    business_date,
-                    point_id,
-                    sale_datetime
+                    p.business_date,
+                    p.point_id,
+                    p.carried_at,
+                    p.payment_key
                 """,
                 date_from,
                 date_to,
@@ -577,23 +591,25 @@ class ShiftEngine:
         events: list[SaleEvent] = []
 
         for row in rows:
+            signed_amount = Decimal(
+                row["signed_amount"] or 0
+            )
+
             events.append(
                 SaleEvent(
                     point_id=row["point_id"],
                     sale_id=row["sale_id"],
                     business_date=row["business_date"],
                     check_shift_type=row["business_shift_type"],
-                    when=row["sale_datetime"],
+                    when=row["carried_at"],
 
                     seller_id=row["seller_id"],
                     seller_name=row["seller_name"] or "",
 
-                    amount=Decimal(
-                        row["total_price"] or 0
-                    ),
-                    is_return=bool(
-                        row["is_return"]
-                    ),
+                    # signed_amount is already signed in payment ledger.
+                    # SaleEvent.is_return=False prevents a second inversion.
+                    amount=signed_amount,
+                    is_return=False,
 
                     saby_shift_id=row["saby_shift_id"],
                     saby_shift_number=(
@@ -609,11 +625,11 @@ class ShiftEngine:
         )
 
         cash_shifts.sort(
-            key=lambda shift: (
-                shift.business_date,
-                shift.point_id,
-                shift.shift_type,
-                shift.started_at,
+            key=lambda item: (
+                item.business_date,
+                item.point_id,
+                item.shift_type,
+                item.started_at,
             )
         )
 
@@ -687,33 +703,33 @@ class ShiftEngine:
                         """,
                         [
                             (
-                                shift.key,
+                                item.key,
 
-                                shift.point_id,
-                                shift.business_date,
-                                shift.shift_type,
+                                item.point_id,
+                                item.business_date,
+                                item.shift_type,
 
-                                shift.seller_key,
-                                shift.seller_id,
-                                shift.seller_name,
+                                item.seller_key,
+                                item.seller_id,
+                                item.seller_name,
 
-                                shift.started_at,
-                                shift.ended_at,
+                                item.started_at,
+                                item.ended_at,
 
-                                shift.check_count,
-                                shift.net_revenue,
+                                item.check_count,
+                                item.net_revenue,
 
-                                shift.source,
-                                shift.confidence,
-                                shift.status,
+                                item.source,
+                                item.confidence,
+                                item.status,
 
-                                shift.saby_shift_id,
-                                shift.saby_shift_number,
+                                item.saby_shift_id,
+                                item.saby_shift_number,
 
-                                shift.duration_hours,
-                                shift.dominant_share,
+                                item.duration_hours,
+                                item.dominant_share,
                             )
-                            for shift in cash_shifts
+                            for item in cash_shifts
                         ],
                     )
 
@@ -759,37 +775,36 @@ class ShiftEngine:
                         """,
                         [
                             (
-                                shift.point_id,
-                                shift.business_date,
-                                shift.shift_type,
+                                item.point_id,
+                                item.business_date,
+                                item.shift_type,
 
-                                shift.seller_key,
-                                shift.seller_id,
-                                shift.seller_name,
+                                item.seller_key,
+                                item.seller_id,
+                                item.seller_name,
 
-                                shift.started_at,
-                                shift.ended_at,
+                                item.started_at,
+                                item.ended_at,
 
-                                shift.check_count,
-                                shift.net_revenue,
+                                item.check_count,
+                                item.net_revenue,
 
-                                shift.cash_shift_count,
+                                item.cash_shift_count,
                                 json.dumps(
-                                    shift.cash_shift_keys,
+                                    item.cash_shift_keys,
                                     ensure_ascii=False,
                                 ),
 
-                                shift.source,
-                                shift.confidence,
-                                shift.status,
+                                item.source,
+                                item.confidence,
+                                item.status,
 
-                                shift.duration_hours,
+                                item.duration_hours,
                             )
-                            for shift in work_shifts
+                            for item in work_shifts
                         ],
                     )
 
-                # Legacy table should no longer be used.
                 await conn.execute(
                     """
                     DELETE FROM seller_shifts

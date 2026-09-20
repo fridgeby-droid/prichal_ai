@@ -134,6 +134,51 @@ def _business_fields(check_datetime: datetime | None) -> tuple[date | None, str 
     return business_date, shift_type
 
 
+
+def _payment_key(payment: dict[str, Any], index: int) -> str:
+    for field in ("Payment", "Key"):
+        value = payment.get(field)
+        if value not in (None, ""):
+            return f"{field}:{value}"
+
+    check_number = str(payment.get("CheckNumber") or "").strip()
+    carried = str(payment.get("CarriedWTZ") or "").strip()
+
+    if check_number or carried:
+        return f"check:{check_number}:{carried}:{index}"
+
+    return f"line:{index}"
+
+
+def _payment_amount(payment: dict[str, Any]) -> Decimal:
+    """
+    Saby documents Payments[].Amount as payment/check amount.
+    Fallback only if Amount is absent/blank.
+    """
+    raw = payment.get("Amount")
+    if raw not in (None, ""):
+        return _dec(raw)
+
+    return (
+        _dec(payment.get("PayCash"))
+        + _dec(payment.get("PayBank"))
+        + _dec(payment.get("PayCertificate"))
+        + _dec(payment.get("PaySalary"))
+    )
+
+
+def _signed_payment_amount(
+    payment: dict[str, Any],
+    order: dict[str, Any],
+) -> Decimal:
+    amount = _payment_amount(payment)
+
+    if bool(order.get("Return")):
+        return -abs(amount)
+
+    return amount
+
+
 def _item_key(position: dict[str, Any], index: int) -> str:
     for key in ("SaleNomenclature", "Key", "NomenclatureUUID"):
         value = position.get(key)
@@ -229,6 +274,93 @@ ON CONFLICT(point_id, sale_id) DO UPDATE SET
     synced_at = NOW()
 """
 
+
+PAYMENT_INSERT_SQL = """
+INSERT INTO sale_payments(
+    point_id,
+    sale_id,
+    payment_key,
+
+    payment_id,
+    check_number,
+
+    carried_at,
+    opened_at,
+    closed_at,
+
+    business_date,
+    business_shift_type,
+
+    seller_id,
+    seller_name,
+
+    saby_shift_id,
+    saby_shift_number,
+    teller_id,
+
+    amount,
+    signed_amount,
+
+    cash_sum,
+    bank_sum,
+    certificate_sum,
+    salary_sum,
+
+    nonfiscal,
+    is_return,
+
+    source,
+    raw_json,
+    synced_at
+)
+VALUES(
+    $1,$2,$3,
+    $4,$5,
+    $6,$7,$8,
+    $9,$10,
+    $11,$12,
+    $13,$14,$15,
+    $16,$17,
+    $18,$19,$20,$21,
+    $22,$23,
+    $24,$25::jsonb,
+    NOW()
+)
+ON CONFLICT(point_id, sale_id, payment_key) DO UPDATE SET
+    payment_id=EXCLUDED.payment_id,
+    check_number=EXCLUDED.check_number,
+
+    carried_at=EXCLUDED.carried_at,
+    opened_at=EXCLUDED.opened_at,
+    closed_at=EXCLUDED.closed_at,
+
+    business_date=EXCLUDED.business_date,
+    business_shift_type=EXCLUDED.business_shift_type,
+
+    seller_id=EXCLUDED.seller_id,
+    seller_name=EXCLUDED.seller_name,
+
+    saby_shift_id=EXCLUDED.saby_shift_id,
+    saby_shift_number=EXCLUDED.saby_shift_number,
+    teller_id=EXCLUDED.teller_id,
+
+    amount=EXCLUDED.amount,
+    signed_amount=EXCLUDED.signed_amount,
+
+    cash_sum=EXCLUDED.cash_sum,
+    bank_sum=EXCLUDED.bank_sum,
+    certificate_sum=EXCLUDED.certificate_sum,
+    salary_sum=EXCLUDED.salary_sum,
+
+    nonfiscal=EXCLUDED.nonfiscal,
+    is_return=EXCLUDED.is_return,
+
+    source=EXCLUDED.source,
+    raw_json=EXCLUDED.raw_json,
+    synced_at=NOW()
+"""
+
+
 ITEM_INSERT_SQL = """
 INSERT INTO sale_items(
     point_id, sale_id, item_key,
@@ -298,8 +430,14 @@ class SabySyncService:
         self,
         point: dict[str, Any],
         orders: list[dict[str, Any]],
-    ) -> tuple[list[tuple], list[tuple], list[tuple[int, int]]]:
+    ) -> tuple[
+        list[tuple],
+        list[tuple],
+        list[tuple],
+        list[tuple[int, int]],
+    ]:
         sale_rows: list[tuple] = []
+        payment_rows: list[tuple] = []
         item_rows: list[tuple] = []
         sale_keys: list[tuple[int, int]] = []
 
@@ -361,6 +499,150 @@ class SabySyncService:
             )
             sale_keys.append((point["id"], sale_id))
 
+            payments = order.get("Payments") or []
+            if not isinstance(payments, list):
+                payments = []
+
+            for payment_index, payment in enumerate(payments):
+                if not isinstance(payment, dict):
+                    continue
+
+                carried_at = _parse_dt(payment.get("CarriedWTZ"))
+                payment_business_date, payment_shift_type = _business_fields(
+                    carried_at
+                )
+
+                amount = _payment_amount(payment)
+                signed_amount = _signed_payment_amount(payment, order)
+
+                payment_rows.append(
+                    (
+                        point["id"],
+                        sale_id,
+                        _payment_key(payment, payment_index),
+
+                        _int_or_none(payment.get("Payment")),
+                        str(payment.get("CheckNumber") or "").strip(),
+
+                        carried_at,
+                        _parse_dt(payment.get("OpenedWTZ")),
+                        _parse_dt(payment.get("ClosedWTZ")),
+
+                        payment_business_date,
+                        payment_shift_type,
+
+                        seller_id,
+                        str(order.get("SellerName") or "").strip(),
+
+                        _int_or_none(payment.get("Shift"))
+                        or payment_ctx["shift_id"],
+
+                        str(
+                            payment.get("ShiftNumber")
+                            or payment_ctx["shift_number"]
+                            or ""
+                        ).strip(),
+
+                        _int_or_none(payment.get("Teller"))
+                        or payment_ctx["teller_id"],
+
+                        amount,
+                        signed_amount,
+
+                        _dec(
+                            payment.get("CashSum")
+                            if payment.get("CashSum") not in (None, "")
+                            else payment.get("PayCash")
+                        ),
+
+                        _dec(
+                            payment.get("BankSum")
+                            if payment.get("BankSum") not in (None, "")
+                            else payment.get("PayBank")
+                        ),
+
+                        _dec(
+                            payment.get("CertificateSum")
+                            if payment.get("CertificateSum") not in (None, "")
+                            else payment.get("PayCertificate")
+                        ),
+
+                        _dec(
+                            payment.get("SalarySum")
+                            if payment.get("SalarySum") not in (None, "")
+                            else payment.get("PaySalary")
+                        ),
+
+                        bool(payment.get("Nonfiscal")),
+                        bool(order.get("Return")),
+
+                        "saby_payment",
+                        json.dumps(
+                            payment,
+                            ensure_ascii=False,
+                            default=str,
+                        ),
+                    )
+                )
+
+            # If Saby ever returns a sale without Payments, keep a visible
+            # fallback row so reconciliation exposes the exception instead
+            # of silently losing money.
+            if not payments:
+                fallback_dt = payment_ctx["check_datetime"]
+                fallback_business_date, fallback_shift_type = _business_fields(
+                    fallback_dt
+                )
+                sale_amount = _dec(order.get("TotalPrice"))
+                signed_sale_amount = (
+                    -abs(sale_amount)
+                    if bool(order.get("Return"))
+                    else sale_amount
+                )
+
+                payment_rows.append(
+                    (
+                        point["id"],
+                        sale_id,
+                        "fallback:sale_total",
+
+                        None,
+                        "",
+
+                        fallback_dt,
+                        None,
+                        None,
+
+                        fallback_business_date,
+                        fallback_shift_type,
+
+                        seller_id,
+                        str(order.get("SellerName") or "").strip(),
+
+                        payment_ctx["shift_id"],
+                        payment_ctx["shift_number"],
+                        payment_ctx["teller_id"],
+
+                        sale_amount,
+                        signed_sale_amount,
+
+                        Decimal("0"),
+                        Decimal("0"),
+                        Decimal("0"),
+                        Decimal("0"),
+
+                        False,
+                        bool(order.get("Return")),
+
+                        "sale_total_fallback",
+                        json.dumps(
+                            {"TotalPrice": order.get("TotalPrice")},
+                            ensure_ascii=False,
+                            default=str,
+                        ),
+                    )
+                )
+
             for idx, pos in enumerate(order.get("SaleNomenclatures") or []):
                 item_rows.append(
                     (
@@ -387,14 +669,14 @@ class SabySyncService:
                     )
                 )
 
-        return sale_rows, item_rows, sale_keys
+        return sale_rows, payment_rows, item_rows, sale_keys
 
     async def _write_batch(
         self,
         point: dict[str, Any],
         orders: list[dict[str, Any]],
     ) -> tuple[int, int]:
-        sale_rows, item_rows, sale_keys = self._prepare_rows(point, orders)
+        sale_rows, payment_rows, item_rows, sale_keys = self._prepare_rows(point, orders)
         if not sale_rows:
             return 0, 0
 
@@ -402,6 +684,21 @@ class SabySyncService:
             async with conn.transaction():
                 # One executemany call instead of one DB request per sale.
                 await conn.executemany(SALE_UPSERT_SQL, sale_rows)
+
+                # Payments are a full snapshot for each Saby sale.
+                await conn.executemany(
+                    """
+                    DELETE FROM sale_payments
+                    WHERE point_id=$1 AND sale_id=$2
+                    """,
+                    sale_keys,
+                )
+
+                if payment_rows:
+                    await conn.executemany(
+                        PAYMENT_INSERT_SQL,
+                        payment_rows,
+                    )
 
                 # Items are a full snapshot for each sale in Saby.
                 await conn.executemany(

@@ -46,8 +46,10 @@ NIGHT = 20:00–07:59 следующего календарного дня.
 5. Для смен source=saby_native является предпочтительным.
 6. fallback_reconstructed используется только если Saby не дал shift identity.
 7. Никогда не рассчитывай зарплату самостоятельно — PayrollEngine появится позже.
-8. Перед финансовым использованием смен дата должна пройти reconciliation:
-   RAW business-day revenue должна совпасть с суммой employee work shifts.
+8. Источник сменной выручки — sale_payments (Saby Payments[].Amount),
+   а НЕ sales.TotalPrice. TotalPrice — контрольная сумма продажи.
+9. Перед финансовым использованием смен дата должна пройти reconciliation:
+   payment-ledger revenue должна совпасть с суммой employee work shifts.
 9. Saby live tools используют календарное окно API и являются только fallback/
    диагностикой. Не сравнивай их напрямую с business-day цифрами без пояснения.
 10. Не придумывай данные и причины.

@@ -89,6 +89,7 @@ async def health() -> dict:
                 (SELECT COUNT(*) FROM stores) AS stores,
                 (SELECT COUNT(*) FROM sales) AS sales,
                 (SELECT COUNT(*) FROM sale_items) AS sale_items,
+                (SELECT COUNT(*) FROM sale_payments) AS sale_payments,
 
                 (SELECT COUNT(*) FROM cash_shifts) AS cash_shifts,
                 (SELECT COUNT(*) FROM employee_work_shifts) AS shifts
@@ -101,6 +102,7 @@ async def health() -> dict:
         "stores": row["stores"],
         "sales": row["sales"],
         "sale_items": row["sale_items"],
+        "sale_payments": row["sale_payments"],
         "cash_shifts": row["cash_shifts"],
         "shifts": row["shifts"],
     }
@@ -120,6 +122,7 @@ async def reset_saby_data() -> None:
                     cash_shifts,
                     seller_shifts,
                     sale_items,
+                    sale_payments,
                     sales,
                     sync_runs,
                     stores

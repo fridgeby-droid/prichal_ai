@@ -96,42 +96,40 @@ class AnalyticsService:
                 """
                 SELECT
                     COUNT(*) FILTER (
-                        WHERE is_return=FALSE
+                        WHERE p.is_return=FALSE
                     ) AS sales_checks,
 
                     COUNT(*) FILTER (
-                        WHERE is_return=TRUE
+                        WHERE p.is_return=TRUE
                     ) AS return_checks,
 
-                    COUNT(DISTINCT point_id) AS stores,
+                    COUNT(DISTINCT p.point_id) AS stores,
 
                     COALESCE(
-                        SUM(
-                            CASE
-                                WHEN is_return
-                                THEN -ABS(total_price)
-                                ELSE total_price
-                            END
-                        ),
+                        SUM(p.signed_amount),
                         0
                     ) AS net_revenue,
 
                     COALESCE(
-                        SUM(total_discount),
+                        SUM(s.total_discount),
                         0
                     ) AS discounts,
 
                     COUNT(
                         DISTINCT NULLIF(
-                            seller_name,
+                            p.seller_name,
                             ''
                         )
                     ) AS sellers
 
-                FROM sales
+                FROM sale_payments p
 
-                WHERE deleted=FALSE
-                  AND business_date=$1
+                JOIN sales s
+                  ON s.point_id=p.point_id
+                 AND s.sale_id=p.sale_id
+
+                WHERE s.deleted=FALSE
+                  AND p.business_date=$1
                 """,
                 day,
             )
@@ -279,36 +277,34 @@ class AnalyticsService:
                 """
                 SELECT
                     COUNT(*) FILTER (
-                        WHERE is_return=FALSE
+                        WHERE p.is_return=FALSE
                     ) AS sales_checks,
 
                     COUNT(*) FILTER (
-                        WHERE is_return=TRUE
+                        WHERE p.is_return=TRUE
                     ) AS return_checks,
 
                     COALESCE(
-                        SUM(
-                            CASE
-                                WHEN is_return
-                                THEN -ABS(total_price)
-                                ELSE total_price
-                            END
-                        ),
+                        SUM(p.signed_amount),
                         0
                     ) AS net_revenue,
 
                     COUNT(
                         DISTINCT NULLIF(
-                            seller_name,
+                            p.seller_name,
                             ''
                         )
                     ) AS sellers
 
-                FROM sales
+                FROM sale_payments p
 
-                WHERE point_id=$1
-                  AND deleted=FALSE
-                  AND business_date=$2
+                JOIN sales s
+                  ON s.point_id=p.point_id
+                 AND s.sale_id=p.sale_id
+
+                WHERE p.point_id=$1
+                  AND s.deleted=FALSE
+                  AND p.business_date=$2
                 """,
                 store["point_id"],
                 day,
@@ -795,6 +791,7 @@ class AnalyticsService:
             ],
         }
 
+
     async def reconcile(
         self,
         date_value: str = "вчера",
@@ -804,16 +801,11 @@ class AnalyticsService:
         async with pool().acquire() as conn:
             rows = await conn.fetch(
                 """
-                WITH raw AS (
+                WITH sale_totals AS (
                     SELECT
                         point_id,
 
-                        COUNT(*) AS raw_checks,
-
-                        COUNT(*) FILTER (
-                            WHERE seller_id IS NULL
-                              AND seller_name=''
-                        ) AS no_seller_checks,
+                        COUNT(*) AS sale_count,
 
                         COALESCE(
                             SUM(
@@ -824,7 +816,7 @@ class AnalyticsService:
                                 END
                             ),
                             0
-                        ) AS raw_revenue
+                        ) AS sale_total
 
                     FROM sales
 
@@ -832,6 +824,38 @@ class AnalyticsService:
                       AND business_date=$1
 
                     GROUP BY point_id
+                ),
+
+                payments AS (
+                    SELECT
+                        p.point_id,
+
+                        COUNT(*) AS payment_checks,
+
+                        COUNT(*) FILTER (
+                            WHERE p.source='sale_total_fallback'
+                        ) AS fallback_payments,
+
+                        COUNT(*) FILTER (
+                            WHERE p.seller_id IS NULL
+                              AND p.seller_name=''
+                        ) AS no_seller_checks,
+
+                        COALESCE(
+                            SUM(p.signed_amount),
+                            0
+                        ) AS payment_revenue
+
+                    FROM sale_payments p
+
+                    JOIN sales s
+                      ON s.point_id=p.point_id
+                     AND s.sale_id=p.sale_id
+
+                    WHERE s.deleted=FALSE
+                      AND p.business_date=$1
+
+                    GROUP BY p.point_id
                 ),
 
                 work AS (
@@ -865,14 +889,26 @@ class AnalyticsService:
                     st.point_id,
                     st.name AS store,
 
-                    COALESCE(raw.raw_checks,0) AS raw_checks,
-                    COALESCE(work.work_checks,0) AS work_checks,
+                    COALESCE(sale_totals.sale_count,0)
+                        AS sale_count,
 
-                    COALESCE(raw.no_seller_checks,0)
+                    COALESCE(sale_totals.sale_total,0)
+                        AS sale_total,
+
+                    COALESCE(payments.payment_checks,0)
+                        AS payment_checks,
+
+                    COALESCE(payments.payment_revenue,0)
+                        AS payment_revenue,
+
+                    COALESCE(payments.fallback_payments,0)
+                        AS fallback_payments,
+
+                    COALESCE(payments.no_seller_checks,0)
                         AS no_seller_checks,
 
-                    COALESCE(raw.raw_revenue,0)
-                        AS raw_revenue,
+                    COALESCE(work.work_checks,0)
+                        AS work_checks,
 
                     COALESCE(work.work_revenue,0)
                         AS work_revenue,
@@ -885,13 +921,17 @@ class AnalyticsService:
 
                 FROM stores st
 
-                LEFT JOIN raw
-                  ON raw.point_id=st.point_id
+                LEFT JOIN sale_totals
+                  ON sale_totals.point_id=st.point_id
+
+                LEFT JOIN payments
+                  ON payments.point_id=st.point_id
 
                 LEFT JOIN work
                   ON work.point_id=st.point_id
 
-                WHERE raw.point_id IS NOT NULL
+                WHERE sale_totals.point_id IS NOT NULL
+                   OR payments.point_id IS NOT NULL
                    OR work.point_id IS NOT NULL
 
                 ORDER BY st.name
@@ -902,35 +942,33 @@ class AnalyticsService:
         result = []
 
         for row in rows:
-            raw_revenue = Decimal(
-                row["raw_revenue"] or 0
+            sale_total = Decimal(
+                row["sale_total"] or 0
             )
-
+            payment_revenue = Decimal(
+                row["payment_revenue"] or 0
+            )
             work_revenue = Decimal(
                 row["work_revenue"] or 0
             )
 
-            diff = raw_revenue - work_revenue
+            sale_vs_payment = sale_total - payment_revenue
+            payment_vs_work = payment_revenue - work_revenue
 
-            checks_match = (
-                row["raw_checks"]
-                == row["work_checks"]
+            payment_work_money_ok = (
+                abs(payment_vs_work) < Decimal("0.01")
             )
 
-            money_match = (
-                abs(diff)
-                < Decimal("0.01")
+            payment_work_checks_ok = (
+                row["payment_checks"] == row["work_checks"]
             )
 
-            status = (
-                "OK"
-                if (
-                    checks_match
-                    and money_match
-                    and row["no_seller_checks"] == 0
-                    and row["review_shifts"] == 0
-                )
-                else "REVIEW"
+            work_ok = (
+                payment_work_money_ok
+                and payment_work_checks_ok
+                and row["no_seller_checks"] == 0
+                and row["review_shifts"] == 0
+                and row["fallback_payments"] == 0
             )
 
             result.append(
@@ -938,29 +976,30 @@ class AnalyticsService:
                     "point_id": row["point_id"],
                     "store": row["store"],
 
-                    "raw_checks": row["raw_checks"],
+                    "sale_count": row["sale_count"],
+                    "sale_total": _money(sale_total),
+
+                    "payment_checks": row["payment_checks"],
+                    "payment_revenue": _money(payment_revenue),
+
+                    "sale_vs_payment": _money(sale_vs_payment),
+
                     "work_checks": row["work_checks"],
+                    "work_revenue": _money(work_revenue),
 
-                    "no_seller_checks": (
-                        row["no_seller_checks"]
-                    ),
+                    "payment_vs_work": _money(payment_vs_work),
 
-                    "raw_revenue": _money(
-                        raw_revenue
-                    ),
-
-                    "work_revenue": _money(
-                        work_revenue
-                    ),
-
-                    "difference": _money(diff),
+                    "fallback_payments": row["fallback_payments"],
+                    "no_seller_checks": row["no_seller_checks"],
 
                     "work_shifts": row["work_shifts"],
-                    "review_shifts": (
-                        row["review_shifts"]
-                    ),
+                    "review_shifts": row["review_shifts"],
 
-                    "status": status,
+                    "status": (
+                        "OK"
+                        if work_ok
+                        else "REVIEW"
+                    ),
                 }
             )
 
@@ -982,6 +1021,8 @@ class AnalyticsService:
             "stores": result,
         }
 
+
+
     async def shift_diagnostics(
         self,
         date_value: str = "вчера",
@@ -993,36 +1034,48 @@ class AnalyticsService:
                 isolation="repeatable_read",
                 readonly=True,
             ):
-                totals = await conn.fetchrow(
+                payments = await conn.fetchrow(
                     """
                     SELECT
                         COUNT(*) AS checks,
 
                         COUNT(*) FILTER (
-                            WHERE business_shift_type='DAY'
+                            WHERE p.business_shift_type='DAY'
                         ) AS day_checks,
 
                         COUNT(*) FILTER (
-                            WHERE business_shift_type='NIGHT'
+                            WHERE p.business_shift_type='NIGHT'
                         ) AS night_checks,
 
                         COUNT(*) FILTER (
-                            WHERE seller_id IS NOT NULL
+                            WHERE p.seller_id IS NOT NULL
                         ) AS seller_id_checks,
 
                         COUNT(*) FILTER (
-                            WHERE saby_shift_id IS NOT NULL
+                            WHERE p.saby_shift_id IS NOT NULL
                         ) AS shift_id_checks,
 
                         COUNT(*) FILTER (
-                            WHERE check_time_source
-                                  ='Payments.CarriedWTZ'
-                        ) AS carried_time
+                            WHERE p.source='saby_payment'
+                        ) AS saby_payments,
 
-                    FROM sales
+                        COUNT(*) FILTER (
+                            WHERE p.source='sale_total_fallback'
+                        ) AS fallbacks,
 
-                    WHERE deleted=FALSE
-                      AND business_date=$1
+                        COALESCE(
+                            SUM(p.signed_amount),
+                            0
+                        ) AS payment_revenue
+
+                    FROM sale_payments p
+
+                    JOIN sales s
+                      ON s.point_id=p.point_id
+                     AND s.sale_id=p.sale_id
+
+                    WHERE s.deleted=FALSE
+                      AND p.business_date=$1
                     """,
                     day,
                 )
@@ -1037,9 +1090,13 @@ class AnalyticsService:
                         ) AS native,
 
                         COUNT(*) FILTER (
-                            WHERE source
-                                  ='fallback_reconstructed'
-                        ) AS fallback
+                            WHERE source='fallback_reconstructed'
+                        ) AS fallback,
+
+                        COALESCE(
+                            SUM(net_revenue),
+                            0
+                        ) AS revenue
 
                     FROM cash_shifts
 
@@ -1072,7 +1129,12 @@ class AnalyticsService:
                         COALESCE(
                             SUM(cash_shift_count),
                             0
-                        ) AS cash_segments
+                        ) AS cash_segments,
+
+                        COALESCE(
+                            SUM(net_revenue),
+                            0
+                        ) AS revenue
 
                     FROM employee_work_shifts
 
@@ -1081,15 +1143,32 @@ class AnalyticsService:
                     day,
                 )
 
+        def money(value):
+            return _money(value)
+
         return {
             "business_date": day.isoformat(),
             "timezone": settings.business_tz,
             "business_day_start_hour": (
                 settings.business_day_start_hour
             ),
-            "checks": dict(totals),
-            "cash_shifts": dict(cash),
-            "work_shifts": dict(work),
+
+            "payments": {
+                **dict(payments),
+                "payment_revenue": money(
+                    payments["payment_revenue"]
+                ),
+            },
+
+            "cash_shifts": {
+                **dict(cash),
+                "revenue": money(cash["revenue"]),
+            },
+
+            "work_shifts": {
+                **dict(work),
+                "revenue": money(work["revenue"]),
+            },
         }
 
 

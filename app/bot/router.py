@@ -45,7 +45,7 @@ async def start(message: Message) -> None:
         return
 
     await message.answer(
-        "Причал AI v0.2.6 ✅\n\n"
+        "Причал AI v0.2.7 ✅\n\n"
         "Добавлено:\n"
         "• Neon/PostgreSQL;\n"
         "• история Saby;\n"
@@ -123,6 +123,7 @@ async def database_status(message: Message) -> None:
             f"Магазинов: {db['stores']}\n"
             f"Продаж: {db['sales']}\n"
             f"Позиций: {db['sale_items']}\n"
+            f"Payment/check facts: {db.get('sale_payments', 0)}\n"
             f"Cash shifts: {db.get('cash_shifts', 0)}\n"
             f"Рабочих смен: {db['shifts']}\n"
             f"Business dates: {coverage.get('min_date')} → {coverage.get('max_date')}\n"
@@ -258,6 +259,7 @@ async def shifts(message: Message) -> None:
 
 
 
+
 @router.message(Command("shiftdebug"))
 async def shift_debug(message: Message) -> None:
     if not _allowed(message):
@@ -270,38 +272,40 @@ async def shift_debug(message: Message) -> None:
     try:
         data = await analytics_service.shift_diagnostics(date_value)
 
-        checks = data["checks"]
+        p = data["payments"]
         cash = data["cash_shifts"]
         work = data["work_shifts"]
 
         await message.answer(
-            "🔎 Business Day / Shift debug\n\n"
+            "🔎 Payment / Shift debug\n\n"
             f"Business date: {data['business_date']}\n"
             f"TZ: {data['timezone']}\n"
             f"Day start: {data['business_day_start_hour']:02d}:00\n\n"
 
-            f"Чеков: {checks['checks']}\n"
-            f"DAY checks: {checks['day_checks']}\n"
-            f"NIGHT checks: {checks['night_checks']}\n"
-            f"Seller ID: {checks['seller_id_checks']}\n"
-            f"Saby Shift ID: {checks['shift_id_checks']}\n"
-            f"CarriedWTZ: {checks['carried_time']}\n\n"
+            f"PAYMENT/CHECK LEDGER\n"
+            f"Чеков: {p['checks']}\n"
+            f"DAY: {p['day_checks']} | NIGHT: {p['night_checks']}\n"
+            f"Seller ID: {p['seller_id_checks']}\n"
+            f"Saby Shift ID: {p['shift_id_checks']}\n"
+            f"Saby payments: {p['saby_payments']}\n"
+            f"Fallback sale totals: {p['fallbacks']}\n"
+            f"Выручка payments: {p['payment_revenue']:.2f} ₽\n\n"
 
-            f"Cash shifts: {cash['total']}\n"
-            f"— Saby native: {cash['native']}\n"
-            f"— fallback: {cash['fallback']}\n\n"
+            f"CASH SHIFTS\n"
+            f"Сегментов: {cash['total']}\n"
+            f"Saby native: {cash['native']} | fallback: {cash['fallback']}\n"
+            f"Выручка: {cash['revenue']:.2f} ₽\n\n"
 
-            f"Employee work shifts: {work['total']}\n"
-            f"— DAY: {work['day']}\n"
-            f"— NIGHT: {work['night']}\n"
-            f"— AUTO: {work['auto']}\n"
-            f"— REVIEW: {work['review']}\n"
-            f"Cash segments inside work shifts: {work['cash_segments']}"
+            f"EMPLOYEE WORK SHIFTS\n"
+            f"Смен: {work['total']}\n"
+            f"DAY: {work['day']} | NIGHT: {work['night']}\n"
+            f"AUTO: {work['auto']} | REVIEW: {work['review']}\n"
+            f"Cash segments: {work['cash_segments']}\n"
+            f"Выручка: {work['revenue']:.2f} ₽"
         )
 
     except Exception as exc:
         logger.exception("Shift debug failed")
-
         await message.answer(
             f"⚠️ Shift debug error:\n{exc}"
         )
@@ -327,6 +331,7 @@ async def rebuild_shifts(message: Message) -> None:
         logger.exception('Shift rebuild failed'); await message.answer(f"⚠️ Shift rebuild error:\n{exc}")
 
 
+
 @router.message(Command("reconcile"))
 async def reconcile_business_day(message: Message) -> None:
     if not _allowed(message):
@@ -350,11 +355,16 @@ async def reconcile_business_day(message: Message) -> None:
 
             lines.append(
                 f"{icon} {row['store']}\n"
-                f"RAW: {row['raw_revenue']:.2f} ₽ / {row['raw_checks']} чек.\n"
-                f"Смены: {row['work_revenue']:.2f} ₽ / {row['work_checks']} чек.\n"
-                f"Разница: {row['difference']:.2f} ₽ | "
-                f"work shifts: {row['work_shifts']} | "
-                f"без продавца: {row['no_seller_checks']} | "
+                f"Sale TotalPrice: {row['sale_total']:.2f} ₽ "
+                f"({row['sale_count']} sales)\n"
+                f"Payments: {row['payment_revenue']:.2f} ₽ "
+                f"({row['payment_checks']} checks)\n"
+                f"Sale − Payments: {row['sale_vs_payment']:.2f} ₽\n"
+                f"Work shifts: {row['work_revenue']:.2f} ₽ "
+                f"({row['work_checks']} checks)\n"
+                f"Payments − Shifts: {row['payment_vs_work']:.2f} ₽\n"
+                f"Fallback: {row['fallback_payments']} | "
+                f"без Seller: {row['no_seller_checks']} | "
                 f"review shifts: {row['review_shifts']}"
             )
 
@@ -365,14 +375,11 @@ async def reconcile_business_day(message: Message) -> None:
 
         text = "\n\n".join(lines)
 
-        for index in range(0, len(text), 3900):
-            await message.answer(
-                text[index:index + 3900]
-            )
+        for i in range(0, len(text), 3900):
+            await message.answer(text[i:i + 3900])
 
     except Exception as exc:
         logger.exception("Reconcile failed")
-
         await message.answer(
             f"⚠️ Reconcile error:\n{exc}"
         )
