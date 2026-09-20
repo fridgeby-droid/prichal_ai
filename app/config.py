@@ -15,8 +15,8 @@ class Settings(BaseSettings):
     saby_point_ids: str = ""
     saby_max_pages_per_point: int = 30
 
-    # Neon / PostgreSQL
     database_url: str
+
     auto_sync_enabled: bool = True
     auto_sync_on_start: bool = True
     sync_interval_minutes: int = 60
@@ -24,13 +24,21 @@ class Settings(BaseSettings):
     max_manual_sync_days: int = 60
     sync_concurrency: int = 4
 
-    # ShiftEngine — перенесено из проверенной логики Apps Script.
+    # Причал business day: 08:00 текущего дня -> 08:00 следующего.
+    business_day_start_hour: int = 8
+
+    # DAY / NIGHT inside one business day.
     shift_day_start_hour: int = 8
     shift_night_start_hour: int = 20
+
+    # Fallback for checks without native Saby shift.
     shift_session_gap_hours: float = 9.0
     shift_max_duration_hours: float = 16.0
     shift_auto_share: float = 0.80
     shift_ambiguous_share: float = 0.65
+
+    # Several Saby cash shifts may belong to one paid employee work shift.
+    work_shift_merge_gap_hours: float = 4.0
 
     core_base_url: str = ""
     core_api_token: str = ""

@@ -1,94 +1,134 @@
-# Причал AI v0.2.5 — Saby Native Shift Engine
+# Причал AI v0.2.6 — Business Day Engine
 
-Финальная проверочная версия сменного контура перед PayrollEngine.
+Главное изменение: Причал больше не использует календарные сутки Saby
+как основную управленческую дату.
 
-## Приоритет определения смен
+## Business day
 
-### 1. Saby native
+`2026-09-19`:
 
-Если чек содержит:
-- `Shift` ID, либо
-- `ShiftNumber`
+- начало: 19.09 08:00
+- конец: 20.09 07:59:59
 
-смена группируется по:
+Внутри:
 
-`point + Saby shift + seller`
+- DAY = 08:00–19:59
+- NIGHT = 20:00–07:59 следующего дня
 
-Seller входит в ключ специально: если в одной кассовой смене поменялся сотрудник,
-мы не склеиваем их в одну seller shift.
+Настройка:
 
-Источник записывается:
+```env
+BUSINESS_DAY_START_HOUR=8
+```
 
-`source = saby_native`
+## Три уровня смен
 
-### 2. Fallback
+### RAW sales
 
-Только для чеков без Shift ID / ShiftNumber:
+Каждый чек хранит:
 
-`seller-first + activity gap`
+- `Payments.CarriedWTZ`
+- `business_date`
+- `business_shift_type`
+- Seller
+- Shift / ShiftNumber
+- сумму
+- возврат
 
-Источник:
+### cash_shifts
 
-`source = fallback_reconstructed`
+Фактические кассовые сегменты Saby.
 
-## DAY / NIGHT
+### employee_work_shifts
 
-Используется фактическое время чека `Payments.CarriedWTZ`.
+Рабочая/оплачиваемая смена сотрудника.
 
-- DAY: 08:00–19:59
-- NIGHT: 20:00–07:59
-- ночная рабочая дата = вечер, когда смена началась.
+Несколько cash shifts одного сотрудника внутри одного DAY/NIGHT могут
+объединяться в одну work shift.
 
-## Диагностика
+Настройка:
 
-`/shiftdebug вчера` теперь выполняет все SQL-запросы в одной
-`REPEATABLE READ` транзакции.
+```env
+WORK_SHIFT_MERGE_GAP_HOURS=4
+```
 
-Поэтому автосинхронизация больше не может дать внутри одного отчёта,
-например, 189 чеков в первой строке и 285 в сумме магазинов.
+## Clean rebuild
 
-Диагностика показывает:
-- нативные Saby Shift ID;
-- количество native/fallback смен;
-- активный RUNNING sync, если он есть.
+Для первой установки v0.2.6 рекомендуется чистый rebuild.
 
-## После деплоя
+ВАЖНО: временно отключите автоматическую синхронизацию:
 
-Повторно забирать Saby данные не обязательно, если v0.2.4 уже успешно
-заполнила `Shift`, `ShiftNumber`, `Teller` и `CarriedWTZ`.
+```env
+AUTO_SYNC_ENABLED=false
+AUTO_SYNC_ON_START=false
+```
 
-Сначала:
+Задеплойте v0.2.6 и выполните:
 
 ```text
-/rebuildshifts 4
+/resetdata confirm
 ```
 
 Затем:
 
 ```text
+/sync 7
+```
+
+После загрузки:
+
+```text
+/rebuildshifts 7
+```
+
+Затем:
+
+```text
+/reconcile вчера
+```
+
+и:
+
+```text
 /shifts вчера
 ```
 
-И:
+После успешной проверки можно снова включить auto sync.
 
-```text
-/shiftdebug вчера
-```
+## Reconciliation
 
-Если нужно обновить свежие чеки:
+`/reconcile вчера`
 
-```text
-/sync 1
-```
+Для каждого магазина проверяет:
 
-## Что считаем успешным
+RAW business-day revenue
+=
+SUM(employee work shifts revenue)
 
-Для большинства чеков с заполненными Saby Shift:
+и:
 
-- `source=saby_native`;
-- разумное число DAY/NIGHT смен;
-- магазины имеют ожидаемое количество продавцов/смен;
-- fallback близок к нулю;
-- диагностика согласована по количеству чеков.
+RAW check count
+=
+SUM(employee work shift check_count)
 
-После этого можно фиксировать ShiftEngine и переходить к PayrollEngine.
+Если есть:
+- денежная разница;
+- потерянные чеки;
+- чеки без Seller;
+- REVIEW shifts;
+
+статус магазина = REVIEW.
+
+До PayrollEngine используем только даты со статусом OK.
+
+## Reset safety
+
+`/resetdata confirm` удаляет только:
+
+- Saby raw sales/items;
+- cash shifts;
+- employee work shifts;
+- sync history;
+- stores Saby.
+
+Причал Core и его БД не затрагиваются.

@@ -111,6 +111,29 @@ def _payment_context(order: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+
+def _business_fields(check_datetime: datetime | None) -> tuple[date | None, str | None]:
+    if check_datetime is None:
+        return None, None
+
+    local = check_datetime.astimezone(ZoneInfo(settings.business_tz))
+
+    if local.hour >= settings.business_day_start_hour:
+        business_date = local.date()
+    else:
+        business_date = local.date() - timedelta(days=1)
+
+    shift_type = (
+        "DAY"
+        if settings.shift_day_start_hour
+        <= local.hour
+        < settings.shift_night_start_hour
+        else "NIGHT"
+    )
+
+    return business_date, shift_type
+
+
 def _item_key(position: dict[str, Any], index: int) -> str:
     for key in ("SaleNomenclature", "Key", "NomenclatureUUID"):
         value = position.get(key)
@@ -122,49 +145,86 @@ def _item_key(position: dict[str, Any], index: int) -> str:
 SALE_UPSERT_SQL = """
 INSERT INTO sales(
     point_id, sale_id, sale_key, sale_number,
-    sale_datetime, order_datetime, check_time_source,
-    opened_at, closed_at,
-    seller_id, seller_name,
-    saby_shift_id, saby_shift_number, teller_id,
-    customer_id, customer_name,
-    total_price, total_discount,
-    is_return, deleted,
-    warehouse_id, warehouse_name,
-    raw_json, synced_at
+
+    sale_datetime,
+    order_datetime,
+    check_time_source,
+
+    business_date,
+    business_shift_type,
+
+    opened_at,
+    closed_at,
+
+    seller_id,
+    seller_name,
+
+    saby_shift_id,
+    saby_shift_number,
+    teller_id,
+
+    customer_id,
+    customer_name,
+
+    total_price,
+    total_discount,
+
+    is_return,
+    deleted,
+
+    warehouse_id,
+    warehouse_name,
+
+    raw_json,
+    synced_at
 )
 VALUES(
     $1,$2,$3,$4,
     $5,$6,$7,
     $8,$9,
     $10,$11,
-    $12,$13,$14,
-    $15,$16,
+    $12,$13,
+    $14,$15,$16,
     $17,$18,
     $19,$20,
     $21,$22,
-    $23::jsonb,NOW()
+    $23,$24,
+    $25::jsonb,
+    NOW()
 )
 ON CONFLICT(point_id, sale_id) DO UPDATE SET
     sale_key = EXCLUDED.sale_key,
     sale_number = EXCLUDED.sale_number,
+
     sale_datetime = EXCLUDED.sale_datetime,
     order_datetime = EXCLUDED.order_datetime,
     check_time_source = EXCLUDED.check_time_source,
+
+    business_date = EXCLUDED.business_date,
+    business_shift_type = EXCLUDED.business_shift_type,
+
     opened_at = EXCLUDED.opened_at,
     closed_at = EXCLUDED.closed_at,
+
     seller_id = EXCLUDED.seller_id,
     seller_name = EXCLUDED.seller_name,
+
     saby_shift_id = EXCLUDED.saby_shift_id,
     saby_shift_number = EXCLUDED.saby_shift_number,
     teller_id = EXCLUDED.teller_id,
+
     customer_id = EXCLUDED.customer_id,
     customer_name = EXCLUDED.customer_name,
+
     total_price = EXCLUDED.total_price,
     total_discount = EXCLUDED.total_discount,
+
     is_return = EXCLUDED.is_return,
     deleted = EXCLUDED.deleted,
+
     warehouse_id = EXCLUDED.warehouse_id,
     warehouse_name = EXCLUDED.warehouse_name,
+
     raw_json = EXCLUDED.raw_json,
     synced_at = NOW()
 """
@@ -256,30 +316,46 @@ class SabySyncService:
             seller_id = _seller_id(order)
             payment_ctx = _payment_context(order)
 
+            business_date, business_shift_type = _business_fields(
+                payment_ctx["check_datetime"]
+            )
+
             sale_rows.append(
                 (
                     point["id"],
                     sale_id,
                     str(order.get("Key") or ""),
                     str(order.get("Number") or ""),
+
                     payment_ctx["check_datetime"],
                     payment_ctx["order_datetime"],
                     payment_ctx["check_time_source"],
+
+                    business_date,
+                    business_shift_type,
+
                     _parse_dt(order.get("OpenedWTZ")),
                     _parse_dt(order.get("ClosedWTZ")),
+
                     seller_id,
                     str(order.get("SellerName") or "").strip(),
+
                     payment_ctx["shift_id"],
                     payment_ctx["shift_number"],
                     payment_ctx["teller_id"],
+
                     _int_or_none(order.get("Customer")),
                     str(order.get("CustomerName") or "").strip(),
+
                     _dec(order.get("TotalPrice")),
                     _dec(order.get("TotalDiscount")),
+
                     bool(order.get("Return")),
                     bool(order.get("Deleted")),
+
                     _int_or_none(order.get("Warehouse")),
                     str(order.get("WarehouseName") or "").strip(),
+
                     json.dumps(order, ensure_ascii=False, default=str),
                 )
             )

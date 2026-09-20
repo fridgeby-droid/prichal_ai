@@ -31,7 +31,7 @@ async def list_stores() -> str:
 
 @tool
 async def get_network_history_summary(date: str = "вчера") -> str:
-    """Получить сводку сети за уже синхронизированную дату из PostgreSQL.
+    """Получить сводку сети за Причал business day 08:00→08:00 из PostgreSQL.
 
     Args:
         date: Дата YYYY-MM-DD либо 'сегодня'/'вчера'.
@@ -41,7 +41,7 @@ async def get_network_history_summary(date: str = "вчера") -> str:
 
 @tool
 async def get_store_history_summary(store: str, date: str = "вчера") -> str:
-    """Получить показатели магазина и определённые смены из PostgreSQL.
+    """Получить показатели магазина и employee work shifts за business day 08:00→08:00.
 
     Args:
         store: Название, часть названия, адрес или pointId.
@@ -68,7 +68,7 @@ async def get_top_products_history(
 
 @tool
 async def get_shift_summary(date: str = "вчера") -> str:
-    """Получить определённые дневные/ночные смены по сети.
+    """Получить employee work shifts DAY/NIGHT за Причал business day.
 
     Args:
         date: Рабочая дата смены YYYY-MM-DD либо 'сегодня'/'вчера'.

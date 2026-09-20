@@ -9,7 +9,7 @@ from aiogram.types import Message
 
 from app.agent.executive import ask_executive_agent
 from app.config import get_settings
-from app.db.database import health as db_health
+from app.db.database import health as db_health, reset_saby_data
 from app.services.analytics import analytics_service
 from app.services.saby import saby_client
 from app.services.sync import sync_service
@@ -45,7 +45,7 @@ async def start(message: Message) -> None:
         return
 
     await message.answer(
-        "Причал AI v0.2.5 ✅\n\n"
+        "Причал AI v0.2.6 ✅\n\n"
         "Добавлено:\n"
         "• Neon/PostgreSQL;\n"
         "• история Saby;\n"
@@ -123,8 +123,9 @@ async def database_status(message: Message) -> None:
             f"Магазинов: {db['stores']}\n"
             f"Продаж: {db['sales']}\n"
             f"Позиций: {db['sale_items']}\n"
-            f"Смен: {db['shifts']}\n"
-            f"Покрытие: {coverage.get('min_date')} → {coverage.get('max_date')}\n"
+            f"Cash shifts: {db.get('cash_shifts', 0)}\n"
+            f"Рабочих смен: {db['shifts']}\n"
+            f"Business dates: {coverage.get('min_date')} → {coverage.get('max_date')}\n"
             f"Последний sync: {last.get('status', '—')}"
         )
     except Exception as exc:
@@ -229,7 +230,7 @@ async def shifts(message: Message) -> None:
         rows = data["shifts"][:30]
 
         lines = [
-            f"🕒 Смены за {data['date']}",
+            f"🕒 Рабочие смены за business date {data['business_date']}",
             f"Всего: {data['total']} | AUTO: {data['auto']} | "
             f"REVIEW: {data['review']} | AMBIGUOUS: {data['ambiguous']}",
             f"Saby native: {data.get('saby_native', 0)} | "
@@ -242,6 +243,7 @@ async def shifts(message: Message) -> None:
             lines.append(
                 f"{icon} {row['store']} — {row['seller_name']}\n"
                 f"{row['check_count']} чек. | {row['net_revenue']:.2f} ₽ | "
+                f"{row['cash_shift_count']} cash shift | "
                 f"{row['status']} {row['confidence']:.0%}"
             )
 
@@ -255,62 +257,55 @@ async def shifts(message: Message) -> None:
         await message.answer(f"⚠️ Ошибка:\n{exc}")
 
 
+
 @router.message(Command("shiftdebug"))
 async def shift_debug(message: Message) -> None:
     if not _allowed(message):
-        await _reject(message); return
-    parts=(message.text or "").split(maxsplit=1)
-    date_value=parts[1] if len(parts)>1 else "вчера"
-    try:
-        data=await analytics_service.shift_diagnostics(date_value)
-        t=data['totals']
-        lines=[
-            f"🔎 Shift debug: {data['date']}",f"TZ: {data['timezone']}","",
-            f"Чеков по effective time: {t['sales_total']}",
-            f"Seller ID: {t['with_seller_id']}",f"SellerName: {t['with_seller_name']}",
-            f"Без Seller: {t['without_seller']}",f"Teller: {t['with_teller']}",
-            f"Shift ID: {t['with_shift_id']}",f"ShiftNumber: {t['with_shift_number']}",
-            f"Payments.CarriedWTZ: {t['carried_time']}",
-            f"Payments.ClosedWTZ: {t['closed_time']}",
-            f"Payments.OpenedWTZ: {t['opened_time']}",
-            f"DateWTZ fallback: {t['datewtz_fallback']}",
-            f"Уникальных Seller ID: {t['unique_seller_ids']}",
-            f"Нативных кассовых смен Saby: {t.get('native_cash_shifts', 0)}",
-            f"Первый чек: {t['first_check']}",
-            f"Последний чек: {t['last_check']}",
-            "","Покрытие CHECK time:"]
-        for x in data['check_dates']:
-            lines.append(f"• {x['date']}: {x['sales']} чек. (Seller {x['seller_identified']})")
-        lines.append("\nПокрытие Saby DateWTZ:")
-        for x in data['document_dates']:
-            lines.append(f"• {x['date']}: {x['sales']}")
-        lines.append("\nПо магазинам выбранной даты:")
-        for x in data['by_store']:
-            lines.append(
-                f"• {x['store']}: {x['sales']} чек.; "
-                f"Shift IDs {x.get('native_shift_ids', 0)}; "
-                f"{x['first_check']} → {x['last_check']}"
-            )
-        lines.append("\nСмены в БД по рабочим датам:")
-        for x in data['shift_dates']:
-            lines.append(
-                f"• {x['work_date']}: {x['shifts']} "
-                f"(A {x['auto']} / R {x['review']} / X {x['ambiguous']}; "
-                f"Saby {x.get('saby_native', 0)} / fallback {x.get('fallback', 0)})"
-            )
+        await _reject(message)
+        return
 
-        if data.get('active_sync'):
-            sync = data['active_sync']
-            lines.append(
-                "\n⚠️ В момент диагностики есть RUNNING sync "
-                f"#{sync['id']} ({sync['date_from']} → {sync['date_to']}). "
-                "Но цифры выше взяты из одного repeatable-read snapshot."
-            )
-        text='\n'.join(lines)
-        for i in range(0,len(text),3900):
-            await message.answer(text[i:i+3900])
+    parts = (message.text or "").split(maxsplit=1)
+    date_value = parts[1] if len(parts) > 1 else "вчера"
+
+    try:
+        data = await analytics_service.shift_diagnostics(date_value)
+
+        checks = data["checks"]
+        cash = data["cash_shifts"]
+        work = data["work_shifts"]
+
+        await message.answer(
+            "🔎 Business Day / Shift debug\n\n"
+            f"Business date: {data['business_date']}\n"
+            f"TZ: {data['timezone']}\n"
+            f"Day start: {data['business_day_start_hour']:02d}:00\n\n"
+
+            f"Чеков: {checks['checks']}\n"
+            f"DAY checks: {checks['day_checks']}\n"
+            f"NIGHT checks: {checks['night_checks']}\n"
+            f"Seller ID: {checks['seller_id_checks']}\n"
+            f"Saby Shift ID: {checks['shift_id_checks']}\n"
+            f"CarriedWTZ: {checks['carried_time']}\n\n"
+
+            f"Cash shifts: {cash['total']}\n"
+            f"— Saby native: {cash['native']}\n"
+            f"— fallback: {cash['fallback']}\n\n"
+
+            f"Employee work shifts: {work['total']}\n"
+            f"— DAY: {work['day']}\n"
+            f"— NIGHT: {work['night']}\n"
+            f"— AUTO: {work['auto']}\n"
+            f"— REVIEW: {work['review']}\n"
+            f"Cash segments inside work shifts: {work['cash_segments']}"
+        )
+
     except Exception as exc:
-        logger.exception('Shift debug failed'); await message.answer(f"⚠️ Shift debug error:\n{exc}")
+        logger.exception("Shift debug failed")
+
+        await message.answer(
+            f"⚠️ Shift debug error:\n{exc}"
+        )
+
 
 @router.message(Command("rebuildshifts"))
 async def rebuild_shifts(message: Message) -> None:
@@ -330,6 +325,103 @@ async def rebuild_shifts(message: Message) -> None:
         await message.answer(f"✅ ShiftEngine пересобран\n\nПериод: {date_from.isoformat()} → {today.isoformat()}\nСмен: {count}")
     except Exception as exc:
         logger.exception('Shift rebuild failed'); await message.answer(f"⚠️ Shift rebuild error:\n{exc}")
+
+
+@router.message(Command("reconcile"))
+async def reconcile_business_day(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    date_value = parts[1] if len(parts) > 1 else "вчера"
+
+    try:
+        data = await analytics_service.reconcile(date_value)
+
+        lines = [
+            f"🧮 Reconcile business day {data['business_date']}",
+            f"Окно: {data['window']}",
+            "",
+        ]
+
+        for row in data["stores"]:
+            icon = "✅" if row["status"] == "OK" else "⚠️"
+
+            lines.append(
+                f"{icon} {row['store']}\n"
+                f"RAW: {row['raw_revenue']:.2f} ₽ / {row['raw_checks']} чек.\n"
+                f"Смены: {row['work_revenue']:.2f} ₽ / {row['work_checks']} чек.\n"
+                f"Разница: {row['difference']:.2f} ₽ | "
+                f"work shifts: {row['work_shifts']} | "
+                f"без продавца: {row['no_seller_checks']} | "
+                f"review shifts: {row['review_shifts']}"
+            )
+
+        lines.append(
+            "\nИТОГ: "
+            + ("✅ OK" if data["ok"] else "⚠️ REVIEW")
+        )
+
+        text = "\n\n".join(lines)
+
+        for index in range(0, len(text), 3900):
+            await message.answer(
+                text[index:index + 3900]
+            )
+
+    except Exception as exc:
+        logger.exception("Reconcile failed")
+
+        await message.answer(
+            f"⚠️ Reconcile error:\n{exc}"
+        )
+
+
+@router.message(Command("resetdata"))
+async def reset_data(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+
+    if len(parts) < 2 or parts[1].strip().lower() != "confirm":
+        await message.answer(
+            "⚠️ Эта команда удалит ВСЕ загруженные Saby-данные "
+            "и производную аналитику Причал AI.\n\n"
+            "Причал Core не затрагивается.\n\n"
+            "Для подтверждения отправьте:\n"
+            "/resetdata confirm"
+        )
+        return
+
+    if (
+        _current_sync_task is not None
+        and not _current_sync_task.done()
+    ):
+        await message.answer(
+            "⛔ Сначала остановите sync: /cancelsync"
+        )
+        return
+
+    try:
+        await reset_saby_data()
+
+        await message.answer(
+            "🧹 Saby/analytics data очищены.\n\n"
+            "Следующий шаг для чистой загрузки:\n"
+            "/sync 7"
+        )
+
+    except Exception as exc:
+        logger.exception("Reset data failed")
+
+        await message.answer(
+            f"⚠️ Reset error:\n{exc}"
+        )
+
+
 
 
 @router.message(F.text)

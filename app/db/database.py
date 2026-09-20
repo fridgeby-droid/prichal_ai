@@ -16,33 +16,38 @@ _pool: asyncpg.Pool | None = None
 
 
 def _normalize_neon_dsn(dsn: str) -> str:
-    """
-    Neon often provides channel_binding=require.
-    asyncpg does not need that option; sslmode=require is enough.
-    """
     value = dsn.strip()
+
     if value.startswith("postgresql+asyncpg://"):
         value = "postgresql://" + value[len("postgresql+asyncpg://"):]
 
     parts = urlsplit(value)
+
     query = [
-        (k, v)
-        for k, v in parse_qsl(parts.query, keep_blank_values=True)
-        if k.lower() != "channel_binding"
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key.lower() != "channel_binding"
     ]
+
     return urlunsplit(
-        (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+        (
+            parts.scheme,
+            parts.netloc,
+            parts.path,
+            urlencode(query),
+            parts.fragment,
+        )
     )
 
 
 async def init_db() -> None:
     global _pool
+
     if _pool is not None:
         return
 
-    dsn = _normalize_neon_dsn(settings.database_url)
     _pool = await asyncpg.create_pool(
-        dsn=dsn,
+        dsn=_normalize_neon_dsn(settings.database_url),
         min_size=1,
         max_size=5,
         command_timeout=90,
@@ -62,6 +67,7 @@ async def init_db() -> None:
 
 async def close_db() -> None:
     global _pool
+
     if _pool is not None:
         await _pool.close()
         _pool = None
@@ -79,10 +85,13 @@ async def health() -> dict:
             """
             SELECT
                 NOW() AS now,
+
                 (SELECT COUNT(*) FROM stores) AS stores,
                 (SELECT COUNT(*) FROM sales) AS sales,
                 (SELECT COUNT(*) FROM sale_items) AS sale_items,
-                (SELECT COUNT(*) FROM seller_shifts) AS shifts
+
+                (SELECT COUNT(*) FROM cash_shifts) AS cash_shifts,
+                (SELECT COUNT(*) FROM employee_work_shifts) AS shifts
             """
         )
 
@@ -92,5 +101,28 @@ async def health() -> dict:
         "stores": row["stores"],
         "sales": row["sales"],
         "sale_items": row["sale_items"],
+        "cash_shifts": row["cash_shifts"],
         "shifts": row["shifts"],
     }
+
+
+async def reset_saby_data() -> None:
+    """
+    Clears only Saby-derived/analytical data.
+    DB structure and app_meta remain.
+    """
+    async with pool().acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                TRUNCATE TABLE
+                    employee_work_shifts,
+                    cash_shifts,
+                    seller_shifts,
+                    sale_items,
+                    sales,
+                    sync_runs,
+                    stores
+                RESTART IDENTITY CASCADE
+                """
+            )
