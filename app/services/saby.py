@@ -161,9 +161,36 @@ class SabyClient:
         date_value: str,
         need_discount_info: bool = True,
     ) -> list[dict[str, Any]]:
+        """
+        Saby documents page/pageSize for retail/order/list but does not expose
+        a documented hasMore flag for this method. Some accounts can return
+        a full repeated page instead of a short terminal page.
+
+        Therefore pagination is guarded by:
+        1) empty page;
+        2) short page;
+        3) repeated page signature;
+        4) zero new Sale/Key identifiers.
+        """
         day = self.resolve_date(date_value)
         page_size = 100
         result: list[dict[str, Any]] = []
+
+        seen_ids: set[str] = set()
+        seen_signatures: set[tuple[str, ...]] = set()
+
+        def order_key(order: dict[str, Any], index: int) -> str:
+            sale = order.get("Sale")
+            if sale not in (None, ""):
+                return f"sale:{sale}"
+
+            key = str(order.get("Key") or "").strip()
+            if key:
+                return f"key:{key}"
+
+            number = str(order.get("Number") or "").strip()
+            date_wtz = str(order.get("DateWTZ") or "").strip()
+            return f"fallback:{number}:{date_wtz}:{index}"
 
         for page in range(self.settings.saby_max_pages_per_point):
             data = await self._get(
@@ -177,13 +204,45 @@ class SabyClient:
                     "needDiscountInfo": str(need_discount_info).lower(),
                 },
             )
+
             orders = data.get("orders") or []
-            if not isinstance(orders, list):
+            if not isinstance(orders, list) or not orders:
                 break
 
-            result.extend(orders)
+            page_keys = [
+                order_key(order, index)
+                for index, order in enumerate(orders)
+            ]
+
+            # Signature of the entire page is the strongest protection
+            # against an API endpoint that ignores/loops the page number.
+            signature = tuple(page_keys)
+            if signature in seen_signatures:
+                break
+            seen_signatures.add(signature)
+
+            new_orders: list[dict[str, Any]] = []
+            for index, order in enumerate(orders):
+                key = page_keys[index]
+                if key in seen_ids:
+                    continue
+                seen_ids.add(key)
+                new_orders.append(order)
+
+            # A full page containing no new sales means pagination loop.
+            if not new_orders:
+                break
+
+            result.extend(new_orders)
+
+            # Normal terminal condition.
             if len(orders) < page_size:
                 break
+
+            # Partial overlap usually means data changed while paging.
+            # Continue only while at least one genuinely new sale arrived.
+            if len(new_orders) < len(orders):
+                continue
 
         return result
 

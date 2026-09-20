@@ -454,6 +454,20 @@ class SabySyncService:
                 "concurrency": settings.sync_concurrency,
             }
 
+        except asyncio.CancelledError:
+            logger.warning("Saby sync cancelled: run_id=%s", run_id)
+            async with pool().acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE sync_runs
+                    SET finished_at=NOW(), status='CANCELLED',
+                        error_text='Cancelled by user'
+                    WHERE id=$1
+                    """,
+                    run_id,
+                )
+            raise
+
         except Exception as exc:
             logger.exception("Saby sync failed")
             async with pool().acquire() as conn:

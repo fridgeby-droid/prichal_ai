@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 _agent_semaphore = asyncio.Semaphore(2)
 _sync_lock = asyncio.Lock()
+_current_sync_task: asyncio.Task | None = None
 
 
 def _allowed(message: Message) -> bool:
@@ -44,7 +45,7 @@ async def start(message: Message) -> None:
         return
 
     await message.answer(
-        "Причал AI v0.2.3 ✅\n\n"
+        "Причал AI v0.2.4 ✅\n\n"
         "Добавлено:\n"
         "• Neon/PostgreSQL;\n"
         "• история Saby;\n"
@@ -133,6 +134,8 @@ async def database_status(message: Message) -> None:
 
 @router.message(Command("sync"))
 async def manual_sync(message: Message) -> None:
+    global _current_sync_task
+
     if not _allowed(message):
         await _reject(message)
         return
@@ -149,17 +152,27 @@ async def manual_sync(message: Message) -> None:
 
     days = max(1, min(days, settings.max_manual_sync_days))
 
-    if _sync_lock.locked():
-        await message.answer("⏳ Синхронизация уже выполняется.")
+    if _sync_lock.locked() or (
+        _current_sync_task is not None
+        and not _current_sync_task.done()
+    ):
+        await message.answer(
+            "⏳ Синхронизация уже выполняется.\n"
+            "Для отмены: /cancelsync"
+        )
         return
 
     status = await message.answer(
-        f"🔄 Синхронизирую последние {days} дн..."
+        f"🔄 Синхронизирую последние {days} дн...\n"
+        "Отмена: /cancelsync"
     )
 
     try:
         async with _sync_lock:
-            result = await sync_service.sync_recent(days)
+            _current_sync_task = asyncio.create_task(
+                sync_service.sync_recent(days)
+            )
+            result = await _current_sync_task
 
         await status.edit_text(
             "✅ Синхронизация завершена\n\n"
@@ -171,9 +184,35 @@ async def manual_sync(message: Message) -> None:
             f"Saby jobs: {result.get('fetch_jobs', '—')} | "
             f"параллельность: {result.get('concurrency', '—')}"
         )
+
+    except asyncio.CancelledError:
+        await status.edit_text("🛑 Синхронизация отменена.")
+
     except Exception as exc:
         logger.exception("Manual sync failed")
         await status.edit_text(f"⚠️ Ошибка sync:\n{exc}")
+
+    finally:
+        _current_sync_task = None
+
+
+@router.message(Command("cancelsync"))
+async def cancel_sync(message: Message) -> None:
+    global _current_sync_task
+
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    if (
+        _current_sync_task is None
+        or _current_sync_task.done()
+    ):
+        await message.answer("ℹ️ Активной ручной синхронизации нет.")
+        return
+
+    _current_sync_task.cancel()
+    await message.answer("🛑 Команда отмены отправлена.")
 
 
 @router.message(Command("shifts"))

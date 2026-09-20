@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     saby_app_secret: str
     saby_secret_key: str
     saby_point_ids: str = ""
-    saby_max_pages_per_point: int = 100
+    saby_max_pages_per_point: int = 30
 
     # Neon / PostgreSQL
     database_url: str
