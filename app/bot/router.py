@@ -45,7 +45,7 @@ async def start(message: Message) -> None:
         return
 
     await message.answer(
-        "Причал AI v0.2.4 ✅\n\n"
+        "Причал AI v0.2.5 ✅\n\n"
         "Добавлено:\n"
         "• Neon/PostgreSQL;\n"
         "• история Saby;\n"
@@ -232,6 +232,8 @@ async def shifts(message: Message) -> None:
             f"🕒 Смены за {data['date']}",
             f"Всего: {data['total']} | AUTO: {data['auto']} | "
             f"REVIEW: {data['review']} | AMBIGUOUS: {data['ambiguous']}",
+            f"Saby native: {data.get('saby_native', 0)} | "
+            f"fallback: {data.get('fallback', 0)}",
             "",
         ]
 
@@ -273,7 +275,9 @@ async def shift_debug(message: Message) -> None:
             f"Payments.OpenedWTZ: {t['opened_time']}",
             f"DateWTZ fallback: {t['datewtz_fallback']}",
             f"Уникальных Seller ID: {t['unique_seller_ids']}",
-            f"Первый чек: {t['first_check']}",f"Последний чек: {t['last_check']}",
+            f"Нативных кассовых смен Saby: {t.get('native_cash_shifts', 0)}",
+            f"Первый чек: {t['first_check']}",
+            f"Последний чек: {t['last_check']}",
             "","Покрытие CHECK time:"]
         for x in data['check_dates']:
             lines.append(f"• {x['date']}: {x['sales']} чек. (Seller {x['seller_identified']})")
@@ -282,10 +286,26 @@ async def shift_debug(message: Message) -> None:
             lines.append(f"• {x['date']}: {x['sales']}")
         lines.append("\nПо магазинам выбранной даты:")
         for x in data['by_store']:
-            lines.append(f"• {x['store']}: {x['sales']} чек.; {x['first_check']} → {x['last_check']}")
+            lines.append(
+                f"• {x['store']}: {x['sales']} чек.; "
+                f"Shift IDs {x.get('native_shift_ids', 0)}; "
+                f"{x['first_check']} → {x['last_check']}"
+            )
         lines.append("\nСмены в БД по рабочим датам:")
         for x in data['shift_dates']:
-            lines.append(f"• {x['work_date']}: {x['shifts']} (A {x['auto']} / R {x['review']} / X {x['ambiguous']})")
+            lines.append(
+                f"• {x['work_date']}: {x['shifts']} "
+                f"(A {x['auto']} / R {x['review']} / X {x['ambiguous']}; "
+                f"Saby {x.get('saby_native', 0)} / fallback {x.get('fallback', 0)})"
+            )
+
+        if data.get('active_sync'):
+            sync = data['active_sync']
+            lines.append(
+                "\n⚠️ В момент диагностики есть RUNNING sync "
+                f"#{sync['id']} ({sync['date_from']} → {sync['date_to']}). "
+                "Но цифры выше взяты из одного repeatable-read snapshot."
+            )
         text='\n'.join(lines)
         for i in range(0,len(text),3900):
             await message.answer(text[i:i+3900])

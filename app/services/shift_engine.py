@@ -4,7 +4,6 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.config import get_settings
@@ -40,6 +39,18 @@ class SaleEvent:
             return f"Seller #{self.seller_id}"
         return "Продавец не определён"
 
+    @property
+    def has_native_shift(self) -> bool:
+        return self.saby_shift_id is not None or bool(self.saby_shift_number)
+
+    @property
+    def native_shift_key(self) -> str:
+        if self.saby_shift_id is not None:
+            return f"id:{self.saby_shift_id}"
+        if self.saby_shift_number:
+            return f"number:{self.saby_shift_number}"
+        return ""
+
 
 @dataclass(slots=True)
 class ShiftResult:
@@ -63,6 +74,16 @@ class ShiftResult:
 
 
 class ShiftEngine:
+    """
+    Priority:
+    1. Saby native Shift ID / ShiftNumber + Seller.
+    2. Seller-first reconstruction by activity gap only for sales
+       without a native shift identifier.
+
+    DAY/NIGHT is derived from actual fiscal check timestamps
+    (Payments.CarriedWTZ stored in sales.sale_datetime).
+    """
+
     def _tz(self) -> ZoneInfo:
         return ZoneInfo(settings.business_tz)
 
@@ -73,82 +94,104 @@ class ShiftEngine:
         return "NIGHT"
 
     def _work_date(self, events: list[SaleEvent], shift_type: str) -> date:
-        local_events = [e.when.astimezone(self._tz()) for e in events]
+        local_events = [event.when.astimezone(self._tz()) for event in events]
 
         if shift_type == "DAY":
-            day_candidates = [
+            candidates = [
                 dt.date()
                 for dt in local_events
                 if settings.shift_day_start_hour
                 <= dt.hour
                 < settings.shift_night_start_hour
             ]
-            return day_candidates[0] if day_candidates else local_events[0].date()
+            return candidates[0] if candidates else local_events[0].date()
 
-        # Night work date is the evening date. If a session only contains
-        # post-midnight checks, it belongs to the previous calendar date.
-        evening = [
+        # A night shift belongs to the evening on which it started.
+        evening_dates = [
             dt.date()
             for dt in local_events
             if dt.hour >= settings.shift_night_start_hour
         ]
-        if evening:
-            return evening[0]
+        if evening_dates:
+            return evening_dates[0]
 
+        # If we only have checks after midnight, anchor them to the previous day.
         return local_events[0].date() - timedelta(days=1)
 
     @staticmethod
-    def _uniform_saby_shift(events: list[SaleEvent]) -> tuple[int | None, str]:
-        ids = {e.saby_shift_id for e in events if e.saby_shift_id is not None}
-        nums = {e.saby_shift_number for e in events if e.saby_shift_number}
+    def _uniform_native_shift(
+        events: list[SaleEvent],
+    ) -> tuple[int | None, str]:
+        ids = {
+            event.saby_shift_id
+            for event in events
+            if event.saby_shift_id is not None
+        }
+        numbers = {
+            event.saby_shift_number
+            for event in events
+            if event.saby_shift_number
+        }
 
         shift_id = next(iter(ids)) if len(ids) == 1 else None
-        shift_number = next(iter(nums)) if len(nums) == 1 else ""
+        shift_number = next(iter(numbers)) if len(numbers) == 1 else ""
         return shift_id, shift_number
 
-    def _classify_session(self, events: list[SaleEvent]) -> ShiftResult:
-        events = sorted(events, key=lambda e: e.when)
-        counts = {"DAY": 0, "NIGHT": 0}
+    def _build_result(
+        self,
+        events: list[SaleEvent],
+        source: str,
+    ) -> ShiftResult:
+        events = sorted(events, key=lambda event: event.when)
 
+        orientation_counts = {"DAY": 0, "NIGHT": 0}
         for event in events:
-            counts[self._orientation(event.when)] += 1
+            orientation_counts[self._orientation(event.when)] += 1
 
-        shift_type = "DAY" if counts["DAY"] >= counts["NIGHT"] else "NIGHT"
-        dominant = counts[shift_type]
+        shift_type = (
+            "DAY"
+            if orientation_counts["DAY"] >= orientation_counts["NIGHT"]
+            else "NIGHT"
+        )
+
+        dominant = orientation_counts[shift_type]
         dominant_share = dominant / len(events)
 
-        started = events[0].when
-        ended = events[-1].when
-        duration_hours = max(0.0, (ended - started).total_seconds() / 3600)
+        started_at = events[0].when
+        ended_at = events[-1].when
+        duration_hours = max(
+            0.0,
+            (ended_at - started_at).total_seconds() / 3600,
+        )
 
-        saby_shift_id, saby_shift_number = self._uniform_saby_shift(events)
-        has_saby_shift = saby_shift_id is not None or bool(saby_shift_number)
-
-        if has_saby_shift:
-            source = "hybrid"
-        else:
-            source = "reconstructed"
-
-        # Confidence follows the logic we already validated in Apps Script:
-        # dominant share + duration sanity. Saby shift id is additional evidence,
-        # not a replacement for time classification.
-        confidence = dominant_share
-        if has_saby_shift:
-            confidence = min(1.0, confidence + 0.10)
-
-        if duration_hours > settings.shift_max_duration_hours:
-            status = "REVIEW"
-        elif dominant_share >= settings.shift_auto_share:
-            status = "AUTO"
-        elif dominant_share >= settings.shift_ambiguous_share:
-            status = "REVIEW"
-        else:
-            status = "AMBIGUOUS"
+        saby_shift_id, saby_shift_number = self._uniform_native_shift(events)
 
         net_revenue = Decimal("0")
         for event in events:
-            value = abs(event.amount)
-            net_revenue += -value if event.is_return else value
+            amount = abs(event.amount)
+            net_revenue += -amount if event.is_return else amount
+
+        # Native Saby shift identity is stronger evidence than reconstructed gap.
+        if source == "saby_native":
+            confidence = 1.0
+            if duration_hours > settings.shift_max_duration_hours:
+                status = "REVIEW"
+                confidence = 0.95
+            elif dominant_share < settings.shift_ambiguous_share:
+                status = "REVIEW"
+                confidence = max(0.80, dominant_share)
+            else:
+                status = "AUTO"
+        else:
+            confidence = dominant_share
+            if duration_hours > settings.shift_max_duration_hours:
+                status = "REVIEW"
+            elif dominant_share >= settings.shift_auto_share:
+                status = "AUTO"
+            elif dominant_share >= settings.shift_ambiguous_share:
+                status = "REVIEW"
+            else:
+                status = "AMBIGUOUS"
 
         first = events[0]
 
@@ -159,8 +202,8 @@ class ShiftEngine:
             seller_key=first.seller_key,
             seller_id=first.seller_id,
             seller_name=first.display_name,
-            started_at=started,
-            ended_at=ended,
+            started_at=started_at,
+            ended_at=ended_at,
             check_count=len(events),
             net_revenue=net_revenue,
             source=source,
@@ -172,67 +215,143 @@ class ShiftEngine:
             dominant_share=dominant_share,
         )
 
+    def _native_results(
+        self,
+        events: list[SaleEvent],
+    ) -> list[ShiftResult]:
+        groups: dict[tuple[int, str, str], list[SaleEvent]] = defaultdict(list)
+
+        for event in events:
+            if not event.has_native_shift:
+                continue
+
+            # Seller remains part of the key:
+            # one cash shift can contain a handover/change of employee.
+            key = (
+                event.point_id,
+                event.native_shift_key,
+                event.seller_key,
+            )
+            groups[key].append(event)
+
+        return [
+            self._build_result(group, "saby_native")
+            for group in groups.values()
+        ]
+
+    def _fallback_results(
+        self,
+        events: list[SaleEvent],
+    ) -> list[ShiftResult]:
+        groups: dict[tuple[int, str], list[SaleEvent]] = defaultdict(list)
+
+        for event in events:
+            if event.has_native_shift:
+                continue
+            groups[(event.point_id, event.seller_key)].append(event)
+
+        gap = timedelta(hours=settings.shift_session_gap_hours)
+        results: list[ShiftResult] = []
+
+        for seller_events in groups.values():
+            seller_events.sort(key=lambda event: event.when)
+            session: list[SaleEvent] = []
+
+            for event in seller_events:
+                if session and event.when - session[-1].when > gap:
+                    results.append(
+                        self._build_result(
+                            session,
+                            "fallback_reconstructed",
+                        )
+                    )
+                    session = []
+                session.append(event)
+
+            if session:
+                results.append(
+                    self._build_result(
+                        session,
+                        "fallback_reconstructed",
+                    )
+                )
+
+        return results
+
     async def rebuild_range(self, date_from: date, date_to: date) -> int:
-        # One-day buffers cover night sessions crossing midnight.
+        # Buffers are required for night shifts crossing midnight.
         query_from = date_from - timedelta(days=1)
         query_to = date_to + timedelta(days=2)
+
+        start_dt = datetime.combine(
+            query_from,
+            datetime.min.time(),
+            tzinfo=self._tz(),
+        )
+        end_dt = datetime.combine(
+            query_to,
+            datetime.min.time(),
+            tzinfo=self._tz(),
+        )
 
         async with pool().acquire() as conn:
             rows = await conn.fetch(
                 """
                 SELECT
-                    point_id, sale_id, sale_datetime,
-                    seller_id, seller_name,
-                    total_price, is_return,
-                    saby_shift_id, saby_shift_number
+                    point_id,
+                    sale_id,
+                    sale_datetime,
+                    seller_id,
+                    seller_name,
+                    total_price,
+                    is_return,
+                    saby_shift_id,
+                    saby_shift_number
                 FROM sales
                 WHERE deleted=FALSE
                   AND sale_datetime >= $1
                   AND sale_datetime < $2
-                  AND (seller_id IS NOT NULL OR seller_name <> '')
                   AND sale_datetime IS NOT NULL
-                ORDER BY point_id, COALESCE(CAST(seller_id AS TEXT), seller_name), sale_datetime
+                  AND (seller_id IS NOT NULL OR seller_name <> '')
+                ORDER BY point_id, sale_datetime
                 """,
-                datetime.combine(query_from, datetime.min.time(), tzinfo=self._tz()),
-                datetime.combine(query_to, datetime.min.time(), tzinfo=self._tz()),
+                start_dt,
+                end_dt,
             )
 
-        grouped: dict[tuple[int, str], list[SaleEvent]] = defaultdict(list)
-
+        events: list[SaleEvent] = []
         for row in rows:
-            event = SaleEvent(
-                point_id=row["point_id"],
-                sale_id=row["sale_id"],
-                when=row["sale_datetime"],
-                seller_id=row["seller_id"],
-                seller_name=row["seller_name"],
-                amount=Decimal(row["total_price"] or 0),
-                is_return=bool(row["is_return"]),
-                saby_shift_id=row["saby_shift_id"],
-                saby_shift_number=row["saby_shift_number"] or "",
+            events.append(
+                SaleEvent(
+                    point_id=row["point_id"],
+                    sale_id=row["sale_id"],
+                    when=row["sale_datetime"],
+                    seller_id=row["seller_id"],
+                    seller_name=row["seller_name"] or "",
+                    amount=Decimal(row["total_price"] or 0),
+                    is_return=bool(row["is_return"]),
+                    saby_shift_id=row["saby_shift_id"],
+                    saby_shift_number=row["saby_shift_number"] or "",
+                )
             )
-            grouped[(event.point_id, event.seller_key)].append(event)
 
-        results: list[ShiftResult] = []
-        gap = timedelta(hours=settings.shift_session_gap_hours)
+        candidates = self._native_results(events) + self._fallback_results(events)
+        results = [
+            result
+            for result in candidates
+            if date_from <= result.work_date <= date_to
+        ]
 
-        for events in grouped.values():
-            events.sort(key=lambda e: e.when)
-            session: list[SaleEvent] = []
-
-            for event in events:
-                if session and event.when - session[-1].when > gap:
-                    result = self._classify_session(session)
-                    if date_from <= result.work_date <= date_to:
-                        results.append(result)
-                    session = []
-
-                session.append(event)
-
-            if session:
-                result = self._classify_session(session)
-                if date_from <= result.work_date <= date_to:
-                    results.append(result)
+        # Stable sort makes reports predictable.
+        results.sort(
+            key=lambda result: (
+                result.work_date,
+                result.point_id,
+                result.shift_type,
+                result.started_at,
+                result.seller_name,
+            )
+        )
 
         async with pool().acquire() as conn:
             async with conn.transaction():
@@ -245,47 +364,58 @@ class ShiftEngine:
                     date_to,
                 )
 
-                for shift in results:
-                    await conn.execute(
+                rows_to_insert = [
+                    (
+                        result.point_id,
+                        result.work_date,
+                        result.shift_type,
+                        result.seller_key,
+                        result.seller_id,
+                        result.seller_name,
+                        result.started_at,
+                        result.ended_at,
+                        result.check_count,
+                        result.net_revenue,
+                        result.source,
+                        result.confidence,
+                        result.status,
+                        result.saby_shift_id,
+                        result.saby_shift_number,
+                        result.duration_hours,
+                        result.dominant_share,
+                    )
+                    for result in results
+                ]
+
+                if rows_to_insert:
+                    await conn.executemany(
                         """
                         INSERT INTO seller_shifts(
-                            point_id, work_date, shift_type,
-                            seller_key, seller_id, seller_name,
-                            started_at, ended_at,
-                            check_count, net_revenue,
-                            source, confidence, status,
-                            saby_shift_id, saby_shift_number,
-                            duration_hours, dominant_share,
+                            point_id,
+                            work_date,
+                            shift_type,
+                            seller_key,
+                            seller_id,
+                            seller_name,
+                            started_at,
+                            ended_at,
+                            check_count,
+                            net_revenue,
+                            source,
+                            confidence,
+                            status,
+                            saby_shift_id,
+                            saby_shift_number,
+                            duration_hours,
+                            dominant_share,
                             updated_at
                         )
                         VALUES(
-                            $1,$2,$3,
-                            $4,$5,$6,
-                            $7,$8,
-                            $9,$10,
-                            $11,$12,$13,
-                            $14,$15,
-                            $16,$17,
-                            NOW()
+                            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+                            $11,$12,$13,$14,$15,$16,$17,NOW()
                         )
                         """,
-                        shift.point_id,
-                        shift.work_date,
-                        shift.shift_type,
-                        shift.seller_key,
-                        shift.seller_id,
-                        shift.seller_name,
-                        shift.started_at,
-                        shift.ended_at,
-                        shift.check_count,
-                        shift.net_revenue,
-                        shift.source,
-                        shift.confidence,
-                        shift.status,
-                        shift.saby_shift_id,
-                        shift.saby_shift_number,
-                        shift.duration_hours,
-                        shift.dominant_share,
+                        rows_to_insert,
                     )
 
         return len(results)

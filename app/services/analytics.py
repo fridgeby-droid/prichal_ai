@@ -198,14 +198,30 @@ class AnalyticsService:
                 FROM seller_shifts ss JOIN stores st ON st.point_id=ss.point_id
                 WHERE ss.work_date=$1 ORDER BY st.name, ss.shift_type, ss.started_at
                 """, day)
-        return {'date':day.isoformat(),'shifts':[
-            {**dict(r),'started_at':r['started_at'].isoformat(),'ended_at':r['ended_at'].isoformat(),
-             'net_revenue':_money(r['net_revenue']),'confidence':float(r['confidence']),
-             'duration_hours':float(r['duration_hours']),'dominant_share':float(r['dominant_share'])}
-            for r in rows],
-            'total':len(rows),'auto':sum(1 for r in rows if r['status']=='AUTO'),
-            'review':sum(1 for r in rows if r['status']=='REVIEW'),
-            'ambiguous':sum(1 for r in rows if r['status']=='AMBIGUOUS')}
+        return {
+            'date': day.isoformat(),
+            'shifts': [
+                {
+                    **dict(r),
+                    'started_at': r['started_at'].isoformat(),
+                    'ended_at': r['ended_at'].isoformat(),
+                    'net_revenue': _money(r['net_revenue']),
+                    'confidence': float(r['confidence']),
+                    'duration_hours': float(r['duration_hours']),
+                    'dominant_share': float(r['dominant_share']),
+                }
+                for r in rows
+            ],
+            'total': len(rows),
+            'auto': sum(1 for r in rows if r['status'] == 'AUTO'),
+            'review': sum(1 for r in rows if r['status'] == 'REVIEW'),
+            'ambiguous': sum(1 for r in rows if r['status'] == 'AMBIGUOUS'),
+            'saby_native': sum(1 for r in rows if r['source'] == 'saby_native'),
+            'fallback': sum(
+                1 for r in rows
+                if r['source'] == 'fallback_reconstructed'
+            ),
+        }
 
     async def seller_shifts(self, seller_query: str, date_from: str='', date_to: str='') -> dict:
         today=datetime.now(ZoneInfo(settings.business_tz)).date()
@@ -229,76 +245,218 @@ class AnalyticsService:
                            'ended_at':r['ended_at'].isoformat(),'net_revenue':_money(r['net_revenue']),
                            'confidence':float(r['confidence'])} for r in rows]}
 
-    async def shift_diagnostics(self, date_value: str='вчера') -> dict:
-        day=self.resolve_date(date_value)
+    async def shift_diagnostics(self, date_value: str = 'вчера') -> dict:
+        day = self.resolve_date(date_value)
+
         async with pool().acquire() as conn:
-            totals=await conn.fetchrow(
-                """
-                SELECT COUNT(*) AS sales_total,
-                       COUNT(*) FILTER (WHERE seller_id IS NOT NULL) AS with_seller_id,
-                       COUNT(*) FILTER (WHERE seller_name <> '') AS with_seller_name,
-                       COUNT(*) FILTER (WHERE seller_id IS NULL AND seller_name='') AS without_seller,
-                       COUNT(*) FILTER (WHERE teller_id IS NOT NULL) AS with_teller,
-                       COUNT(*) FILTER (WHERE saby_shift_id IS NOT NULL) AS with_shift_id,
-                       COUNT(*) FILTER (WHERE saby_shift_number <> '') AS with_shift_number,
-                       COUNT(*) FILTER (WHERE check_time_source='Payments.CarriedWTZ') AS carried_time,
-                       COUNT(*) FILTER (WHERE check_time_source='Payments.ClosedWTZ') AS closed_time,
-                       COUNT(*) FILTER (WHERE check_time_source='Payments.OpenedWTZ') AS opened_time,
-                       COUNT(*) FILTER (WHERE check_time_source='DateWTZ') AS datewtz_fallback,
-                       COUNT(DISTINCT seller_id) FILTER (WHERE seller_id IS NOT NULL) AS unique_seller_ids,
-                       COUNT(DISTINCT NULLIF(seller_name,'')) AS unique_seller_names,
-                       MIN(sale_datetime) AS first_check,
-                       MAX(sale_datetime) AS last_check
-                FROM sales WHERE deleted=FALSE AND (sale_datetime AT TIME ZONE $2)::date=$1
-                """,day,settings.business_tz)
-            by_store=await conn.fetch(
-                """
-                SELECT st.name AS store,s.point_id,COUNT(*) AS sales,
-                       COUNT(*) FILTER (WHERE s.seller_id IS NOT NULL) AS with_seller_id,
-                       COUNT(*) FILTER (WHERE s.seller_name <> '') AS with_seller_name,
-                       COUNT(DISTINCT s.seller_id) FILTER (WHERE s.seller_id IS NOT NULL) AS seller_ids,
-                       COUNT(DISTINCT NULLIF(s.seller_name,'')) AS seller_names,
-                       COUNT(*) FILTER (WHERE s.saby_shift_id IS NOT NULL) AS with_shift,
-                       MIN(s.sale_datetime) AS first_check,
-                       MAX(s.sale_datetime) AS last_check
-                FROM sales s JOIN stores st ON st.point_id=s.point_id
-                WHERE s.deleted=FALSE AND (s.sale_datetime AT TIME ZONE $2)::date=$1
-                GROUP BY st.name,s.point_id ORDER BY st.name
-                """,day,settings.business_tz)
-            check_dates=await conn.fetch(
-                """
-                SELECT (sale_datetime AT TIME ZONE $1)::date AS local_date,
-                       COUNT(*) AS sales,
-                       COUNT(*) FILTER (WHERE seller_id IS NOT NULL OR seller_name <> '') AS seller_identified
-                FROM sales
-                WHERE deleted=FALSE AND sale_datetime IS NOT NULL
-                GROUP BY local_date ORDER BY local_date
-                """,settings.business_tz)
-            document_dates=await conn.fetch(
-                """
-                SELECT (order_datetime AT TIME ZONE $1)::date AS local_date, COUNT(*) AS sales
-                FROM sales
-                WHERE deleted=FALSE AND order_datetime IS NOT NULL
-                GROUP BY local_date ORDER BY local_date
-                """,settings.business_tz)
-            shift_dates=await conn.fetch(
-                """
-                SELECT work_date,COUNT(*) AS shifts,
-                       COUNT(*) FILTER (WHERE status='AUTO') AS auto,
-                       COUNT(*) FILTER (WHERE status='REVIEW') AS review,
-                       COUNT(*) FILTER (WHERE status='AMBIGUOUS') AS ambiguous
-                FROM seller_shifts GROUP BY work_date ORDER BY work_date
-                """)
-        def iso(v):
-            return v.isoformat() if v else None
+            async with conn.transaction(
+                isolation='repeatable_read',
+                readonly=True,
+            ):
+                totals = await conn.fetchrow(
+                    """
+                    SELECT
+                        COUNT(*) AS sales_total,
+                        COUNT(*) FILTER (
+                            WHERE seller_id IS NOT NULL
+                        ) AS with_seller_id,
+                        COUNT(*) FILTER (
+                            WHERE seller_name <> ''
+                        ) AS with_seller_name,
+                        COUNT(*) FILTER (
+                            WHERE seller_id IS NULL AND seller_name=''
+                        ) AS without_seller,
+                        COUNT(*) FILTER (
+                            WHERE teller_id IS NOT NULL
+                        ) AS with_teller,
+                        COUNT(*) FILTER (
+                            WHERE saby_shift_id IS NOT NULL
+                        ) AS with_shift_id,
+                        COUNT(*) FILTER (
+                            WHERE saby_shift_number <> ''
+                        ) AS with_shift_number,
+                        COUNT(*) FILTER (
+                            WHERE check_time_source='Payments.CarriedWTZ'
+                        ) AS carried_time,
+                        COUNT(*) FILTER (
+                            WHERE check_time_source='Payments.ClosedWTZ'
+                        ) AS closed_time,
+                        COUNT(*) FILTER (
+                            WHERE check_time_source='Payments.OpenedWTZ'
+                        ) AS opened_time,
+                        COUNT(*) FILTER (
+                            WHERE check_time_source='DateWTZ'
+                        ) AS datewtz_fallback,
+                        COUNT(DISTINCT seller_id) FILTER (
+                            WHERE seller_id IS NOT NULL
+                        ) AS unique_seller_ids,
+                        COUNT(DISTINCT NULLIF(seller_name,'')) AS unique_seller_names,
+                        COUNT(DISTINCT (point_id, saby_shift_id)) FILTER (
+                            WHERE saby_shift_id IS NOT NULL
+                        ) AS native_cash_shifts,
+                        MIN(sale_datetime) AS first_check,
+                        MAX(sale_datetime) AS last_check
+                    FROM sales
+                    WHERE deleted=FALSE
+                      AND (sale_datetime AT TIME ZONE $2)::date=$1
+                    """,
+                    day,
+                    settings.business_tz,
+                )
+
+                by_store = await conn.fetch(
+                    """
+                    SELECT
+                        st.name AS store,
+                        s.point_id,
+                        COUNT(*) AS sales,
+                        COUNT(*) FILTER (
+                            WHERE s.seller_id IS NOT NULL
+                        ) AS with_seller_id,
+                        COUNT(*) FILTER (
+                            WHERE s.seller_name <> ''
+                        ) AS with_seller_name,
+                        COUNT(DISTINCT s.seller_id) FILTER (
+                            WHERE s.seller_id IS NOT NULL
+                        ) AS seller_ids,
+                        COUNT(DISTINCT NULLIF(s.seller_name,'')) AS seller_names,
+                        COUNT(*) FILTER (
+                            WHERE s.saby_shift_id IS NOT NULL
+                        ) AS with_shift,
+                        COUNT(DISTINCT s.saby_shift_id) FILTER (
+                            WHERE s.saby_shift_id IS NOT NULL
+                        ) AS native_shift_ids,
+                        MIN(s.sale_datetime) AS first_check,
+                        MAX(s.sale_datetime) AS last_check
+                    FROM sales s
+                    JOIN stores st ON st.point_id=s.point_id
+                    WHERE s.deleted=FALSE
+                      AND (s.sale_datetime AT TIME ZONE $2)::date=$1
+                    GROUP BY st.name,s.point_id
+                    ORDER BY st.name
+                    """,
+                    day,
+                    settings.business_tz,
+                )
+
+                check_dates = await conn.fetch(
+                    """
+                    SELECT
+                        (sale_datetime AT TIME ZONE $1)::date AS local_date,
+                        COUNT(*) AS sales,
+                        COUNT(*) FILTER (
+                            WHERE seller_id IS NOT NULL OR seller_name <> ''
+                        ) AS seller_identified
+                    FROM sales
+                    WHERE deleted=FALSE
+                      AND sale_datetime IS NOT NULL
+                    GROUP BY local_date
+                    ORDER BY local_date
+                    """,
+                    settings.business_tz,
+                )
+
+                document_dates = await conn.fetch(
+                    """
+                    SELECT
+                        (order_datetime AT TIME ZONE $1)::date AS local_date,
+                        COUNT(*) AS sales
+                    FROM sales
+                    WHERE deleted=FALSE
+                      AND order_datetime IS NOT NULL
+                    GROUP BY local_date
+                    ORDER BY local_date
+                    """,
+                    settings.business_tz,
+                )
+
+                shift_dates = await conn.fetch(
+                    """
+                    SELECT
+                        work_date,
+                        COUNT(*) AS shifts,
+                        COUNT(*) FILTER (
+                            WHERE status='AUTO'
+                        ) AS auto,
+                        COUNT(*) FILTER (
+                            WHERE status='REVIEW'
+                        ) AS review,
+                        COUNT(*) FILTER (
+                            WHERE status='AMBIGUOUS'
+                        ) AS ambiguous,
+                        COUNT(*) FILTER (
+                            WHERE source='saby_native'
+                        ) AS saby_native,
+                        COUNT(*) FILTER (
+                            WHERE source='fallback_reconstructed'
+                        ) AS fallback
+                    FROM seller_shifts
+                    GROUP BY work_date
+                    ORDER BY work_date
+                    """
+                )
+
+                active_sync = await conn.fetchrow(
+                    """
+                    SELECT id, started_at, date_from, date_to, status
+                    FROM sync_runs
+                    WHERE status='RUNNING'
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                )
+
+        def iso(value):
+            return value.isoformat() if value else None
+
         return {
-            'date':day.isoformat(),
-            'timezone':settings.business_tz,
-            'totals':{**dict(totals),'first_check':iso(totals['first_check']),'last_check':iso(totals['last_check'])},
-            'by_store':[{**dict(r),'first_check':iso(r['first_check']),'last_check':iso(r['last_check'])} for r in by_store],
-            'check_dates':[{'date':r['local_date'].isoformat(),'sales':r['sales'],'seller_identified':r['seller_identified']} for r in check_dates],
-            'document_dates':[{'date':r['local_date'].isoformat(),'sales':r['sales']} for r in document_dates],
-            'shift_dates':[{**dict(r),'work_date':r['work_date'].isoformat()} for r in shift_dates]
+            'date': day.isoformat(),
+            'timezone': settings.business_tz,
+            'totals': {
+                **dict(totals),
+                'first_check': iso(totals['first_check']),
+                'last_check': iso(totals['last_check']),
+            },
+            'by_store': [
+                {
+                    **dict(row),
+                    'first_check': iso(row['first_check']),
+                    'last_check': iso(row['last_check']),
+                }
+                for row in by_store
+            ],
+            'check_dates': [
+                {
+                    'date': row['local_date'].isoformat(),
+                    'sales': row['sales'],
+                    'seller_identified': row['seller_identified'],
+                }
+                for row in check_dates
+            ],
+            'document_dates': [
+                {
+                    'date': row['local_date'].isoformat(),
+                    'sales': row['sales'],
+                }
+                for row in document_dates
+            ],
+            'shift_dates': [
+                {
+                    **dict(row),
+                    'work_date': row['work_date'].isoformat(),
+                }
+                for row in shift_dates
+            ],
+            'active_sync': (
+                {
+                    **dict(active_sync),
+                    'started_at': iso(active_sync['started_at']),
+                    'date_from': active_sync['date_from'].isoformat(),
+                    'date_to': active_sync['date_to'].isoformat(),
+                }
+                if active_sync
+                else None
+            ),
         }
 
 

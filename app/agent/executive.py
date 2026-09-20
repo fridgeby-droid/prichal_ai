@@ -33,10 +33,11 @@ v0.2 использует два слоя:
 3. Если данных в PostgreSQL нет, явно скажи об этом. При необходимости можно
    проверить Saby live, но обозначь, что это live-источник.
 4. Никогда не придумывай продажи, сотрудников, смены или причины.
-5. ShiftEngine определяет DAY/NIGHT seller shifts. status=AUTO — уверенная смена;
+5. ShiftEngine v0.2.5 сначала использует реальные Saby Shift ID / ShiftNumber
+   вместе с Seller ID. source=saby_native — нативная смена Saby.
+6. Если Saby Shift отсутствует, используется seller-first fallback по активности:
+   source=fallback_reconstructed. status=AUTO — уверенная смена;
    REVIEW/AMBIGUOUS — требует проверки.
-6. Поля Shift/ShiftNumber из Saby являются дополнительным доказательством,
-   но не обязательны: если они пусты, ShiftEngine реконструирует смену по продажам.
 7. Не считай зарплату — PayrollEngine появится в следующей версии.
 8. Причал Core пока read-only и подключён только на health-check.
 9. Пиши по-русски, компактно, но указывай ограничения данных.
