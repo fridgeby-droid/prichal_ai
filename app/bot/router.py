@@ -44,7 +44,7 @@ async def start(message: Message) -> None:
         return
 
     await message.answer(
-        "Причал AI v0.2 ✅\n\n"
+        "Причал AI v0.2.2 ✅\n\n"
         "Добавлено:\n"
         "• Neon/PostgreSQL;\n"
         "• история Saby;\n"
@@ -221,21 +221,30 @@ async def shift_debug(message: Message) -> None:
     try:
         data=await analytics_service.shift_diagnostics(date_value)
         t=data['totals']
-        lines=[f"🔎 Shift debug: {data['date']}",f"TZ: {data['timezone']}","",
-               f"Продаж: {t['sales_total']}",f"Seller ID: {t['with_seller_id']}",
-               f"SellerName: {t['with_seller_name']}",f"Без Seller: {t['without_seller']}",
-               f"Teller: {t['with_teller']}",f"Shift ID: {t['with_shift_id']}",
-               f"ShiftNumber: {t['with_shift_number']}",
-               f"Уникальных Seller ID: {t['unique_seller_ids']}",
-               f"Уникальных SellerName: {t['unique_seller_names']}","","По магазинам:"]
-        for r in data['by_store']:
-            lines.append(f"• {r['store']}: {r['sales']} чек.; SellerID {r['with_seller_id']}; Name {r['with_seller_name']}; Shift {r['with_shift']}")
+        lines=[
+            f"🔎 Shift debug: {data['date']}",f"TZ: {data['timezone']}","",
+            f"Чеков по effective time: {t['sales_total']}",
+            f"Seller ID: {t['with_seller_id']}",f"SellerName: {t['with_seller_name']}",
+            f"Без Seller: {t['without_seller']}",f"Teller: {t['with_teller']}",
+            f"Shift ID: {t['with_shift_id']}",f"ShiftNumber: {t['with_shift_number']}",
+            f"Payments.CarriedWTZ: {t['carried_time']}",
+            f"Payments.ClosedWTZ: {t['closed_time']}",
+            f"Payments.OpenedWTZ: {t['opened_time']}",
+            f"DateWTZ fallback: {t['datewtz_fallback']}",
+            f"Уникальных Seller ID: {t['unique_seller_ids']}",
+            f"Первый чек: {t['first_check']}",f"Последний чек: {t['last_check']}",
+            "","Покрытие CHECK time:"]
+        for x in data['check_dates']:
+            lines.append(f"• {x['date']}: {x['sales']} чек. (Seller {x['seller_identified']})")
+        lines.append("\nПокрытие Saby DateWTZ:")
+        for x in data['document_dates']:
+            lines.append(f"• {x['date']}: {x['sales']}")
+        lines.append("\nПо магазинам выбранной даты:")
+        for x in data['by_store']:
+            lines.append(f"• {x['store']}: {x['sales']} чек.; {x['first_check']} → {x['last_check']}")
         lines.append("\nСмены в БД по рабочим датам:")
-        if data['shift_dates']:
-            for r in data['shift_dates']:
-                lines.append(f"• {r['work_date']}: {r['shifts']} (A {r['auto']} / R {r['review']} / X {r['ambiguous']})")
-        else:
-            lines.append('• нет')
+        for x in data['shift_dates']:
+            lines.append(f"• {x['work_date']}: {x['shifts']} (A {x['auto']} / R {x['review']} / X {x['ambiguous']})")
         text='\n'.join(lines)
         for i in range(0,len(text),3900):
             await message.answer(text[i:i+3900])

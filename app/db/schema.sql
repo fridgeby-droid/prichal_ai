@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS sales (
     sale_key TEXT NOT NULL DEFAULT '',
     sale_number TEXT NOT NULL DEFAULT '',
     sale_datetime TIMESTAMPTZ,
+    order_datetime TIMESTAMPTZ,
+    check_time_source TEXT NOT NULL DEFAULT '',
     opened_at TIMESTAMPTZ,
     closed_at TIMESTAMPTZ,
 
@@ -150,3 +152,7 @@ CREATE TABLE IF NOT EXISTS app_meta (
     value JSONB NOT NULL DEFAULT '{}'::jsonb,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- v0.2.2 migration
+ALTER TABLE sales ADD COLUMN IF NOT EXISTS order_datetime TIMESTAMPTZ;
+ALTER TABLE sales ADD COLUMN IF NOT EXISTS check_time_source TEXT NOT NULL DEFAULT '';

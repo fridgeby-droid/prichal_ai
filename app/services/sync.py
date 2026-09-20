@@ -68,6 +68,55 @@ def _seller_id(order: dict[str, Any]) -> int | None:
     return _int_or_none(seller)
 
 
+def _payment_context(order: dict[str, Any]) -> dict[str, Any]:
+    """Extract effective fiscal-check time and cashier/shift metadata.
+
+    Saby DateWTZ is kept separately as the sale/document timestamp.
+    For seller-shift reconstruction we prefer the moment the check was carried.
+    """
+    payments = order.get("Payments") or []
+    if not isinstance(payments, list):
+        payments = []
+
+    check_dt = None
+    source = ""
+    shift_id = _int_or_none(order.get("Shift"))
+    shift_number = str(order.get("ShiftNumber") or "").strip()
+    teller_id = _int_or_none(order.get("Teller"))
+
+    for payment in payments:
+        if not isinstance(payment, dict):
+            continue
+
+        if check_dt is None:
+            for field in ("CarriedWTZ", "ClosedWTZ", "OpenedWTZ"):
+                candidate = _parse_dt(payment.get(field))
+                if candidate is not None:
+                    check_dt = candidate
+                    source = "Payments." + field
+                    break
+
+        if shift_id is None:
+            shift_id = _int_or_none(payment.get("Shift"))
+        if not shift_number:
+            shift_number = str(payment.get("ShiftNumber") or "").strip()
+        if teller_id is None:
+            teller_id = _int_or_none(payment.get("Teller"))
+
+    if check_dt is None:
+        check_dt = _parse_dt(order.get("DateWTZ"))
+        source = "DateWTZ"
+
+    return {
+        "check_datetime": check_dt,
+        "order_datetime": _parse_dt(order.get("DateWTZ")),
+        "check_time_source": source,
+        "shift_id": shift_id,
+        "shift_number": shift_number,
+        "teller_id": teller_id,
+    }
+
+
 def _item_key(position: dict[str, Any], index: int) -> str:
     for key in ("SaleNomenclature", "Key", "NomenclatureUUID"):
         value = position.get(key)
@@ -159,12 +208,14 @@ class SabySyncService:
                                     continue
 
                                 seller_id = _seller_id(order)
+                                payment_ctx = _payment_context(order)
 
                                 await conn.execute(
                                     """
                                     INSERT INTO sales(
                                         point_id, sale_id, sale_key, sale_number,
-                                        sale_datetime, opened_at, closed_at,
+                                        sale_datetime, order_datetime, check_time_source,
+                                        opened_at, closed_at,
                                         seller_id, seller_name,
                                         saby_shift_id, saby_shift_number, teller_id,
                                         customer_id, customer_name,
@@ -177,17 +228,20 @@ class SabySyncService:
                                         $1,$2,$3,$4,
                                         $5,$6,$7,
                                         $8,$9,
-                                        $10,$11,$12,
-                                        $13,$14,
+                                        $10,$11,
+                                        $12,$13,$14,
                                         $15,$16,
                                         $17,$18,
                                         $19,$20,
-                                        $21::jsonb,NOW()
+                                        $21,$22,
+                                        $23::jsonb,NOW()
                                     )
                                     ON CONFLICT(point_id, sale_id) DO UPDATE SET
                                         sale_key = EXCLUDED.sale_key,
                                         sale_number = EXCLUDED.sale_number,
                                         sale_datetime = EXCLUDED.sale_datetime,
+                                        order_datetime = EXCLUDED.order_datetime,
+                                        check_time_source = EXCLUDED.check_time_source,
                                         opened_at = EXCLUDED.opened_at,
                                         closed_at = EXCLUDED.closed_at,
                                         seller_id = EXCLUDED.seller_id,
@@ -210,14 +264,16 @@ class SabySyncService:
                                     sale_id,
                                     str(order.get("Key") or ""),
                                     str(order.get("Number") or ""),
-                                    _parse_dt(order.get("DateWTZ")),
+                                    payment_ctx["check_datetime"],
+                                    payment_ctx["order_datetime"],
+                                    payment_ctx["check_time_source"],
                                     _parse_dt(order.get("OpenedWTZ")),
                                     _parse_dt(order.get("ClosedWTZ")),
                                     seller_id,
                                     str(order.get("SellerName") or "").strip(),
-                                    _int_or_none(order.get("Shift")),
-                                    str(order.get("ShiftNumber") or "").strip(),
-                                    _int_or_none(order.get("Teller")),
+                                    payment_ctx["shift_id"],
+                                    payment_ctx["shift_number"],
+                                    payment_ctx["teller_id"],
                                     _int_or_none(order.get("Customer")),
                                     str(order.get("CustomerName") or "").strip(),
                                     _dec(order.get("TotalPrice")),

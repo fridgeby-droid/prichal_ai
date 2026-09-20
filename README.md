@@ -1,16 +1,21 @@
-# Причал AI v0.2.1
+# Причал AI v0.2.2 — Check Time Fix
 
-Исправляющая сборка ShiftEngine.
+Исправляет временной источник для ShiftEngine.
 
-## Изменения
-- PostgreSQL-сессии работают в BUSINESS_TZ.
-- Исторические даты считаются в Asia/Yekaterinburg, а не UTC.
-- ShiftEngine строит смену по Seller ID даже если SellerName пустой.
-- `/shiftdebug вчера` показывает покрытие Seller/SellerName/Teller/Shift по магазинам.
-- `/rebuildshifts 4` пересобирает смены из уже загруженных данных Neon без запроса Saby.
+Для фактической рабочей смены используется в порядке приоритета:
+1. `Payments[].CarriedWTZ`
+2. `Payments[].ClosedWTZ`
+3. `Payments[].OpenedWTZ`
+4. fallback — `DateWTZ`
 
-## После деплоя
-1. `/shiftdebug вчера`
-2. `/rebuildshifts 4`
-3. `/shifts вчера`
-4. `/db`
+`DateWTZ` отдельно хранится в `order_datetime`.
+`Shift`, `ShiftNumber`, `Teller` ищутся и на уровне продажи, и внутри `Payments`.
+
+Существующую Neon БД удалять не нужно — миграция выполняется при старте.
+
+После деплоя:
+1. `/sync 4`
+2. `/shiftdebug вчера`
+3. `/rebuildshifts 4`
+4. `/shifts вчера`
+5. `/db`

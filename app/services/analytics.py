@@ -241,8 +241,14 @@ class AnalyticsService:
                        COUNT(*) FILTER (WHERE teller_id IS NOT NULL) AS with_teller,
                        COUNT(*) FILTER (WHERE saby_shift_id IS NOT NULL) AS with_shift_id,
                        COUNT(*) FILTER (WHERE saby_shift_number <> '') AS with_shift_number,
+                       COUNT(*) FILTER (WHERE check_time_source='Payments.CarriedWTZ') AS carried_time,
+                       COUNT(*) FILTER (WHERE check_time_source='Payments.ClosedWTZ') AS closed_time,
+                       COUNT(*) FILTER (WHERE check_time_source='Payments.OpenedWTZ') AS opened_time,
+                       COUNT(*) FILTER (WHERE check_time_source='DateWTZ') AS datewtz_fallback,
                        COUNT(DISTINCT seller_id) FILTER (WHERE seller_id IS NOT NULL) AS unique_seller_ids,
-                       COUNT(DISTINCT NULLIF(seller_name,'')) AS unique_seller_names
+                       COUNT(DISTINCT NULLIF(seller_name,'')) AS unique_seller_names,
+                       MIN(sale_datetime) AS first_check,
+                       MAX(sale_datetime) AS last_check
                 FROM sales WHERE deleted=FALSE AND (sale_datetime AT TIME ZONE $2)::date=$1
                 """,day,settings.business_tz)
             by_store=await conn.fetch(
@@ -252,11 +258,29 @@ class AnalyticsService:
                        COUNT(*) FILTER (WHERE s.seller_name <> '') AS with_seller_name,
                        COUNT(DISTINCT s.seller_id) FILTER (WHERE s.seller_id IS NOT NULL) AS seller_ids,
                        COUNT(DISTINCT NULLIF(s.seller_name,'')) AS seller_names,
-                       COUNT(*) FILTER (WHERE s.saby_shift_id IS NOT NULL) AS with_shift
+                       COUNT(*) FILTER (WHERE s.saby_shift_id IS NOT NULL) AS with_shift,
+                       MIN(s.sale_datetime) AS first_check,
+                       MAX(s.sale_datetime) AS last_check
                 FROM sales s JOIN stores st ON st.point_id=s.point_id
                 WHERE s.deleted=FALSE AND (s.sale_datetime AT TIME ZONE $2)::date=$1
                 GROUP BY st.name,s.point_id ORDER BY st.name
                 """,day,settings.business_tz)
+            check_dates=await conn.fetch(
+                """
+                SELECT (sale_datetime AT TIME ZONE $1)::date AS local_date,
+                       COUNT(*) AS sales,
+                       COUNT(*) FILTER (WHERE seller_id IS NOT NULL OR seller_name <> '') AS seller_identified
+                FROM sales
+                WHERE deleted=FALSE AND sale_datetime IS NOT NULL
+                GROUP BY local_date ORDER BY local_date
+                """,settings.business_tz)
+            document_dates=await conn.fetch(
+                """
+                SELECT (order_datetime AT TIME ZONE $1)::date AS local_date, COUNT(*) AS sales
+                FROM sales
+                WHERE deleted=FALSE AND order_datetime IS NOT NULL
+                GROUP BY local_date ORDER BY local_date
+                """,settings.business_tz)
             shift_dates=await conn.fetch(
                 """
                 SELECT work_date,COUNT(*) AS shifts,
@@ -265,9 +289,17 @@ class AnalyticsService:
                        COUNT(*) FILTER (WHERE status='AMBIGUOUS') AS ambiguous
                 FROM seller_shifts GROUP BY work_date ORDER BY work_date
                 """)
-        return {'date':day.isoformat(),'timezone':settings.business_tz,'totals':dict(totals),
-                'by_store':[dict(r) for r in by_store],
-                'shift_dates':[{**dict(r),'work_date':r['work_date'].isoformat()} for r in shift_dates]}
+        def iso(v):
+            return v.isoformat() if v else None
+        return {
+            'date':day.isoformat(),
+            'timezone':settings.business_tz,
+            'totals':{**dict(totals),'first_check':iso(totals['first_check']),'last_check':iso(totals['last_check'])},
+            'by_store':[{**dict(r),'first_check':iso(r['first_check']),'last_check':iso(r['last_check'])} for r in by_store],
+            'check_dates':[{'date':r['local_date'].isoformat(),'sales':r['sales'],'seller_identified':r['seller_identified']} for r in check_dates],
+            'document_dates':[{'date':r['local_date'].isoformat(),'sales':r['sales']} for r in document_dates],
+            'shift_dates':[{**dict(r),'work_date':r['work_date'].isoformat()} for r in shift_dates]
+        }
 
 
 analytics_service=AnalyticsService()

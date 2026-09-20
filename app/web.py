@@ -82,7 +82,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Причал AI",
-    version="0.2.1",
+    version="0.2.2",
     lifespan=lifespan,
 )
 
@@ -91,7 +91,7 @@ app = FastAPI(
 async def root():
     return {
         "service": "prichal-ai",
-        "version": "0.2.1",
+        "version": "0.2.2",
         "status": "ok",
     }
 
@@ -102,6 +102,6 @@ async def health():
     return {
         "ok": True,
         "service": "prichal-ai",
-        "version": "0.2.1",
+        "version": "0.2.2",
         "database": db,
     }
