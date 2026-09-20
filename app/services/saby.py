@@ -187,6 +187,21 @@ class SabyClient:
 
         return result
 
+
+    async def orders_for_point_date(
+        self,
+        point_id: int,
+        date_value: str,
+        need_discount_info: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Public sync method used by the PostgreSQL ingestion layer."""
+        day = self.resolve_date(date_value)
+        return await self._orders_for_point(
+            point_id,
+            day,
+            need_discount_info=need_discount_info,
+        )
+
     async def network_sales_summary(self, date_value: str = "вчера") -> dict[str, Any]:
         day = self.resolve_date(date_value)
         points = await self.list_points()

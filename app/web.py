@@ -9,9 +9,12 @@ from fastapi import FastAPI
 
 from app.bot.router import router
 from app.config import get_settings
+from app.db.database import close_db, health as db_health, init_db
+from app.services.sync import sync_service
 
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
@@ -23,8 +26,34 @@ dp = Dispatcher()
 dp.include_router(router)
 
 
+async def auto_sync_loop() -> None:
+    first = True
+
+    while True:
+        try:
+            if (
+                settings.auto_sync_enabled
+                and (settings.auto_sync_on_start or not first)
+            ):
+                logger.info(
+                    "Starting auto sync for recent %s days",
+                    settings.sync_recent_days,
+                )
+                result = await sync_service.sync_recent(settings.sync_recent_days)
+                logger.info("Auto sync completed: %s", result)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Auto sync failed")
+
+        first = False
+        await asyncio.sleep(max(5, settings.sync_interval_minutes) * 60)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await init_db()
     await bot.delete_webhook(drop_pending_updates=False)
 
     polling_task = asyncio.create_task(
@@ -33,21 +62,27 @@ async def lifespan(app: FastAPI):
             allowed_updates=dp.resolve_used_update_types(),
         )
     )
+    sync_task = asyncio.create_task(auto_sync_loop())
 
     try:
         yield
     finally:
-        polling_task.cancel()
-        try:
-            await polling_task
-        except asyncio.CancelledError:
-            pass
+        for task in (polling_task, sync_task):
+            task.cancel()
+
+        for task in (polling_task, sync_task):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
         await bot.session.close()
+        await close_db()
 
 
 app = FastAPI(
     title="Причал AI",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -56,15 +91,17 @@ app = FastAPI(
 async def root():
     return {
         "service": "prichal-ai",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "status": "ok",
     }
 
 
 @app.get("/health")
 async def health():
+    db = await db_health()
     return {
         "ok": True,
         "service": "prichal-ai",
-        "version": "0.1.0",
+        "version": "0.2.0",
+        "database": db,
     }

@@ -9,13 +9,18 @@ from aiogram.types import Message
 
 from app.agent.executive import ask_executive_agent
 from app.config import get_settings
+from app.db.database import health as db_health
+from app.services.analytics import analytics_service
 from app.services.saby import saby_client
+from app.services.sync import sync_service
 
 
 router = Router()
 settings = get_settings()
 logger = logging.getLogger(__name__)
+
 _agent_semaphore = asyncio.Semaphore(2)
+_sync_lock = asyncio.Lock()
 
 
 def _allowed(message: Message) -> bool:
@@ -38,16 +43,20 @@ async def start(message: Message) -> None:
         return
 
     await message.answer(
-        "Причал AI запущен ✅\n\n"
-        "Первая сборка уже умеет читать Saby:\n"
-        "• сводка продаж по сети;\n"
-        "• показатели конкретного магазина;\n"
-        "• топ товаров;\n"
-        "• точки продаж.\n\n"
-        "Пишите обычным языком, например:\n"
+        "Причал AI v0.2 ✅\n\n"
+        "Добавлено:\n"
+        "• Neon/PostgreSQL;\n"
+        "• история Saby;\n"
+        "• позиции чеков;\n"
+        "• ShiftEngine DAY/NIGHT;\n"
+        "• история смен продавцов.\n\n"
+        "Диагностика: /db\n"
+        "Ручная синхронизация: /sync 3\n"
+        "Смены: /shifts вчера\n\n"
+        "Можно писать обычным языком:\n"
         "«Как вчера отработала сеть?»\n"
-        "«Покажи топ-10 товаров вчера»\n"
-        "«Как вчера отработал Космонавтов?»"
+        "«Кто работал ночью вчера?»\n"
+        "«Сколько смен отработал Иванов в этом месяце?»"
     )
 
 
@@ -56,7 +65,7 @@ async def ping(message: Message) -> None:
     if not _allowed(message):
         await _reject(message)
         return
-    await message.answer("pong ✅")
+    await message.answer("pong ✅ | v0.2")
 
 
 @router.message(Command("whoami"))
@@ -64,6 +73,7 @@ async def whoami(message: Message) -> None:
     if not _allowed(message):
         await _reject(message)
         return
+
     user = message.from_user
     username = f"@{user.username}" if user.username else "—"
     await message.answer(
@@ -91,6 +101,112 @@ async def saby(message: Message) -> None:
     except Exception as exc:
         logger.exception("Saby check failed")
         await message.answer(f"⚠️ Ошибка Saby:\n{exc}")
+
+
+@router.message(Command("db"))
+async def database_status(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    try:
+        db = await db_health()
+        coverage = await analytics_service.coverage()
+        last = coverage.get("last_sync") or {}
+
+        await message.answer(
+            "🗄 Neon/PostgreSQL ✅\n\n"
+            f"Магазинов: {db['stores']}\n"
+            f"Продаж: {db['sales']}\n"
+            f"Позиций: {db['sale_items']}\n"
+            f"Смен: {db['shifts']}\n"
+            f"Покрытие: {coverage.get('min_date')} → {coverage.get('max_date')}\n"
+            f"Последний sync: {last.get('status', '—')}"
+        )
+    except Exception as exc:
+        logger.exception("DB check failed")
+        await message.answer(f"⚠️ Ошибка PostgreSQL:\n{exc}")
+
+
+@router.message(Command("sync"))
+async def manual_sync(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    parts = (message.text or "").split()
+    days = settings.sync_recent_days
+
+    if len(parts) > 1:
+        try:
+            days = int(parts[1])
+        except ValueError:
+            await message.answer("Формат: /sync 3")
+            return
+
+    days = max(1, min(days, settings.max_manual_sync_days))
+
+    if _sync_lock.locked():
+        await message.answer("⏳ Синхронизация уже выполняется.")
+        return
+
+    status = await message.answer(
+        f"🔄 Синхронизирую последние {days} дн..."
+    )
+
+    try:
+        async with _sync_lock:
+            result = await sync_service.sync_recent(days)
+
+        await status.edit_text(
+            "✅ Синхронизация завершена\n\n"
+            f"Период: {result['date_from']} → {result['date_to']}\n"
+            f"Точек: {result['stores']}\n"
+            f"Продаж upsert: {result['sales_upserted']}\n"
+            f"Позиций: {result['items_upserted']}\n"
+            f"Смен построено: {result['shifts_built']}"
+        )
+    except Exception as exc:
+        logger.exception("Manual sync failed")
+        await status.edit_text(f"⚠️ Ошибка sync:\n{exc}")
+
+
+@router.message(Command("shifts"))
+async def shifts(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    date_value = parts[1] if len(parts) > 1 else "вчера"
+
+    try:
+        data = await analytics_service.shift_summary(date_value)
+        rows = data["shifts"][:30]
+
+        lines = [
+            f"🕒 Смены за {data['date']}",
+            f"Всего: {data['total']} | AUTO: {data['auto']} | "
+            f"REVIEW: {data['review']} | AMBIGUOUS: {data['ambiguous']}",
+            "",
+        ]
+
+        for row in rows:
+            icon = "☀️" if row["shift_type"] == "DAY" else "🌙"
+            lines.append(
+                f"{icon} {row['store']} — {row['seller_name']}\n"
+                f"{row['check_count']} чек. | {row['net_revenue']:.2f} ₽ | "
+                f"{row['status']} {row['confidence']:.0%}"
+            )
+
+        if data["total"] > len(rows):
+            lines.append(f"\nПоказаны первые {len(rows)} из {data['total']}.")
+
+        await message.answer("\n".join(lines)[:3900])
+
+    except Exception as exc:
+        logger.exception("Shift report failed")
+        await message.answer(f"⚠️ Ошибка:\n{exc}")
 
 
 @router.message(F.text)
