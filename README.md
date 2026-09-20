@@ -1,21 +1,47 @@
-# Причал AI v0.2.2 — Check Time Fix
+# Причал AI v0.2.3 — Fast Sync
 
-Исправляет временной источник для ShiftEngine.
+Оптимизация синхронизации Saby → Neon.
 
-Для фактической рабочей смены используется в порядке приоритета:
-1. `Payments[].CarriedWTZ`
-2. `Payments[].ClosedWTZ`
-3. `Payments[].OpenedWTZ`
-4. fallback — `DateWTZ`
+## Что было медленно
 
-`DateWTZ` отдельно хранится в `order_datetime`.
-`Shift`, `ShiftNumber`, `Teller` ищутся и на уровне продажи, и внутри `Payments`.
+v0.2.2:
+- store-days загружались последовательно;
+- каждый sale делал отдельный PostgreSQL upsert;
+- позиции каждого sale удалялись/добавлялись отдельными запросами.
 
-Существующую Neon БД удалять не нужно — миграция выполняется при старте.
+На 13 магазинах × несколько дней это давало тысячи сетевых round-trip.
 
-После деплоя:
-1. `/sync 4`
-2. `/shiftdebug вчера`
-3. `/rebuildshifts 4`
-4. `/shifts вчера`
-5. `/db`
+## Что изменено
+
+- `SYNC_CONCURRENCY=4` — одновременно загружаем несколько store-day из Saby;
+- магазины пишутся батчем;
+- sales пишутся через `executemany`;
+- sale_items удаляются/записываются батчами;
+- ShiftEngine запускается только после окончания sync;
+- логика `Payments.CarriedWTZ` из v0.2.2 сохранена.
+
+## Переменная
+
+```env
+SYNC_CONCURRENCY=4
+```
+
+Начните с 4. Не ставьте сразу 10–20: Saby API лучше не перегружать.
+
+## После деплоя
+
+```text
+/ping
+/sync 1
+/shiftdebug вчера
+```
+
+Если всё корректно:
+
+```text
+/sync 4
+/rebuildshifts 4
+/shifts вчера
+```
+
+Существующую Neon базу удалять не нужно.

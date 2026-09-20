@@ -44,7 +44,7 @@ async def start(message: Message) -> None:
         return
 
     await message.answer(
-        "Причал AI v0.2.2 ✅\n\n"
+        "Причал AI v0.2.3 ✅\n\n"
         "Добавлено:\n"
         "• Neon/PostgreSQL;\n"
         "• история Saby;\n"
@@ -167,7 +167,9 @@ async def manual_sync(message: Message) -> None:
             f"Точек: {result['stores']}\n"
             f"Продаж upsert: {result['sales_upserted']}\n"
             f"Позиций: {result['items_upserted']}\n"
-            f"Смен построено: {result['shifts_built']}"
+            f"Смен построено: {result['shifts_built']}\n"
+            f"Saby jobs: {result.get('fetch_jobs', '—')} | "
+            f"параллельность: {result.get('concurrency', '—')}"
         )
     except Exception as exc:
         logger.exception("Manual sync failed")

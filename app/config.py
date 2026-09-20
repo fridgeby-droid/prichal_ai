@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     sync_interval_minutes: int = 60
     sync_recent_days: int = 3
     max_manual_sync_days: int = 60
+    sync_concurrency: int = 4
 
     # ShiftEngine — перенесено из проверенной логики Apps Script.
     shift_day_start_hour: int = 8
