@@ -45,7 +45,7 @@ async def start(message: Message) -> None:
         return
 
     await message.answer(
-        "Причал AI v0.2.7 ✅\n\n"
+        "Причал AI v0.2.8 Diagnostic ✅\n\n"
         "Добавлено:\n"
         "• Neon/PostgreSQL;\n"
         "• история Saby;\n"
@@ -330,6 +330,110 @@ async def rebuild_shifts(message: Message) -> None:
     except Exception as exc:
         logger.exception('Shift rebuild failed'); await message.answer(f"⚠️ Shift rebuild error:\n{exc}")
 
+
+
+@router.message(Command("moneydebug"))
+async def money_debug(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    raw = (message.text or "").strip()
+    payload = raw[len("/moneydebug"):].strip()
+
+    if "|" in payload:
+        store_query, date_value = [
+            part.strip()
+            for part in payload.rsplit("|", 1)
+        ]
+    else:
+        store_query = payload.strip()
+        date_value = "вчера"
+
+    if not store_query:
+        await message.answer(
+            "Формат:\n"
+            "/moneydebug Батумская 5 | 2026-09-19"
+        )
+        return
+
+    try:
+        data = await analytics_service.money_debug(
+            store_query,
+            date_value,
+        )
+
+        if data.get("error"):
+            await message.answer(str(data))
+            return
+
+        stored = data["stored_business_date"]
+        direct = data["direct_timestamp_window"]
+        sale = data["sale_totalprice_direct_window"]
+
+        lines = [
+            f"💰 Money debug — {data['store']}",
+            f"Business date: {data['business_date']}",
+            f"TZ: {data['timezone']}",
+            f"Окно: {data['window_start']} → {data['window_end']}",
+            "",
+            "STORED business_date:",
+            f"Payments: {stored['payment_rows']}",
+            f"Amount: {stored['signed_amount']:.2f} ₽",
+            f"Tender sum: {stored['tender_sum']:.2f} ₽",
+            "",
+            "DIRECT timestamp window:",
+            f"Payments: {direct['payment_rows']}",
+            f"Amount: {direct['signed_amount']:.2f} ₽",
+            f"Tender sum: {direct['tender_sum']:.2f} ₽",
+            "",
+            "SALE TotalPrice direct window:",
+            f"{sale['total_price']:.2f} ₽ / {sale['sales']} sales",
+            "",
+            "DAY/NIGHT:",
+        ]
+
+        for row in data["shift_buckets"]:
+            lines.append(
+                f"{row['shift_type']}: {row['revenue']:.2f} ₽ | "
+                f"{row['checks']} чек. | tender {row['tender_sum']:.2f}"
+            )
+
+        lines.append("")
+        lines.append("ПО ЧАСАМ (локальное время):")
+        for row in data["hourly"]:
+            lines.append(
+                f"{row['hour']:02d}:00 — "
+                f"{row['revenue']:.2f} ₽ | "
+                f"{row['checks']} чек. | "
+                f"tender {row['tender_sum']:.2f}"
+            )
+
+        lines.append("")
+        lines.append("RAW boundary samples:")
+        for row in data["samples"][:20]:
+            tender = (
+                row["cash_sum"] + row["bank_sum"] +
+                row["certificate_sum"] + row["salary_sum"]
+            )
+            lines.append(
+                f"• raw={row['raw_carried_wtz']} | "
+                f"db={row['carried_at']} | "
+                f"local={row['local_time']} | "
+                f"Amount={row['amount']:.2f} | "
+                f"tender={tender:.2f} | "
+                f"{row['seller_name']}"
+            )
+
+        text = "\n".join(lines)
+        for i in range(0, len(text), 3900):
+            await message.answer(text[i:i+3900])
+
+    except Exception as exc:
+        logger.exception("Money debug failed")
+        await message.answer(
+            f"⚠️ Money debug error:\n{exc}"
+        )
 
 
 @router.message(Command("reconcile"))

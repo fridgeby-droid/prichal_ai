@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -1169,6 +1169,297 @@ class AnalyticsService:
                 **dict(work),
                 "revenue": money(work["revenue"]),
             },
+        }
+
+    async def money_debug(
+        self,
+        store_query: str,
+        date_value: str = "вчера",
+    ) -> dict:
+        day = self.resolve_date(date_value)
+
+        store, error = await self._resolve_store(store_query)
+        if error:
+            return error
+
+        start_local = datetime(
+            day.year,
+            day.month,
+            day.day,
+            settings.business_day_start_hour,
+            0,
+            0,
+            tzinfo=ZoneInfo(settings.business_tz),
+        )
+        end_local = start_local + timedelta(days=1)
+
+        async with pool().acquire() as conn:
+            async with conn.transaction(
+                isolation="repeatable_read",
+                readonly=True,
+            ):
+                stored = await conn.fetchrow(
+                    """
+                    SELECT
+                        COUNT(*) AS payment_rows,
+                        COALESCE(SUM(p.signed_amount),0) AS signed_amount,
+                        COALESCE(SUM(
+                            CASE WHEN p.is_return
+                                 THEN -ABS(p.amount)
+                                 ELSE p.amount END
+                        ),0) AS amount_signed_on_fly,
+                        COALESCE(SUM(
+                            CASE WHEN p.is_return
+                                 THEN -ABS(
+                                     p.cash_sum+p.bank_sum+
+                                     p.certificate_sum+p.salary_sum
+                                 )
+                                 ELSE (
+                                     p.cash_sum+p.bank_sum+
+                                     p.certificate_sum+p.salary_sum
+                                 )
+                            END
+                        ),0) AS tender_sum
+                    FROM sale_payments p
+                    JOIN sales s
+                      ON s.point_id=p.point_id
+                     AND s.sale_id=p.sale_id
+                    WHERE s.deleted=FALSE
+                      AND p.point_id=$1
+                      AND p.business_date=$2
+                    """,
+                    store["point_id"],
+                    day,
+                )
+
+                direct = await conn.fetchrow(
+                    """
+                    SELECT
+                        COUNT(*) AS payment_rows,
+                        COALESCE(SUM(p.signed_amount),0) AS signed_amount,
+                        COALESCE(SUM(
+                            CASE WHEN p.is_return
+                                 THEN -ABS(p.amount)
+                                 ELSE p.amount END
+                        ),0) AS amount_signed_on_fly,
+                        COALESCE(SUM(
+                            CASE WHEN p.is_return
+                                 THEN -ABS(
+                                     p.cash_sum+p.bank_sum+
+                                     p.certificate_sum+p.salary_sum
+                                 )
+                                 ELSE (
+                                     p.cash_sum+p.bank_sum+
+                                     p.certificate_sum+p.salary_sum
+                                 )
+                            END
+                        ),0) AS tender_sum
+                    FROM sale_payments p
+                    JOIN sales s
+                      ON s.point_id=p.point_id
+                     AND s.sale_id=p.sale_id
+                    WHERE s.deleted=FALSE
+                      AND p.point_id=$1
+                      AND p.carried_at >= $2
+                      AND p.carried_at < $3
+                    """,
+                    store["point_id"],
+                    start_local,
+                    end_local,
+                )
+
+                hourly = await conn.fetch(
+                    """
+                    SELECT
+                        EXTRACT(
+                            HOUR FROM p.carried_at AT TIME ZONE $2
+                        )::int AS local_hour,
+                        COUNT(*) AS checks,
+                        COALESCE(SUM(p.signed_amount),0) AS revenue,
+                        COALESCE(SUM(
+                            CASE WHEN p.is_return
+                                 THEN -ABS(
+                                     p.cash_sum+p.bank_sum+
+                                     p.certificate_sum+p.salary_sum
+                                 )
+                                 ELSE (
+                                     p.cash_sum+p.bank_sum+
+                                     p.certificate_sum+p.salary_sum
+                                 )
+                            END
+                        ),0) AS tender_sum
+                    FROM sale_payments p
+                    JOIN sales s
+                      ON s.point_id=p.point_id
+                     AND s.sale_id=p.sale_id
+                    WHERE s.deleted=FALSE
+                      AND p.point_id=$1
+                      AND p.carried_at >= $3
+                      AND p.carried_at < $4
+                    GROUP BY local_hour
+                    ORDER BY local_hour
+                    """,
+                    store["point_id"],
+                    settings.business_tz,
+                    start_local,
+                    end_local,
+                )
+
+                shift_buckets = await conn.fetch(
+                    """
+                    SELECT
+                        p.business_shift_type AS shift_type,
+                        COUNT(*) AS checks,
+                        COALESCE(SUM(p.signed_amount),0) AS revenue,
+                        COALESCE(SUM(
+                            CASE WHEN p.is_return
+                                 THEN -ABS(
+                                     p.cash_sum+p.bank_sum+
+                                     p.certificate_sum+p.salary_sum
+                                 )
+                                 ELSE (
+                                     p.cash_sum+p.bank_sum+
+                                     p.certificate_sum+p.salary_sum
+                                 )
+                            END
+                        ),0) AS tender_sum
+                    FROM sale_payments p
+                    JOIN sales s
+                      ON s.point_id=p.point_id
+                     AND s.sale_id=p.sale_id
+                    WHERE s.deleted=FALSE
+                      AND p.point_id=$1
+                      AND p.carried_at >= $2
+                      AND p.carried_at < $3
+                    GROUP BY p.business_shift_type
+                    ORDER BY p.business_shift_type
+                    """,
+                    store["point_id"],
+                    start_local,
+                    end_local,
+                )
+
+                samples = await conn.fetch(
+                    """
+                    SELECT
+                        p.sale_id,
+                        p.payment_key,
+                        p.amount,
+                        p.signed_amount,
+                        p.cash_sum,
+                        p.bank_sum,
+                        p.certificate_sum,
+                        p.salary_sum,
+                        p.is_return,
+                        p.business_date,
+                        p.business_shift_type,
+                        p.carried_at,
+                        p.carried_at AT TIME ZONE $2 AS local_time,
+                        p.raw_json->>'CarriedWTZ' AS raw_carried_wtz,
+                        p.raw_json->>'Amount' AS raw_amount,
+                        p.raw_json->>'CashSum' AS raw_cash_sum,
+                        p.raw_json->>'BankSum' AS raw_bank_sum,
+                        p.raw_json->>'PayCash' AS raw_pay_cash,
+                        p.raw_json->>'PayBank' AS raw_pay_bank,
+                        p.saby_shift_id,
+                        p.saby_shift_number,
+                        p.seller_name
+                    FROM sale_payments p
+                    JOIN sales s
+                      ON s.point_id=p.point_id
+                     AND s.sale_id=p.sale_id
+                    WHERE s.deleted=FALSE
+                      AND p.point_id=$1
+                      AND p.carried_at >= ($3 - INTERVAL '2 hours')
+                      AND p.carried_at < ($4 + INTERVAL '2 hours')
+                    ORDER BY p.carried_at
+                    LIMIT 40
+                    """,
+                    store["point_id"],
+                    settings.business_tz,
+                    start_local,
+                    end_local,
+                )
+
+                sale_totals = await conn.fetchrow(
+                    """
+                    SELECT
+                        COUNT(*) AS sales,
+                        COALESCE(SUM(
+                            CASE WHEN is_return
+                                 THEN -ABS(total_price)
+                                 ELSE total_price END
+                        ),0) AS total_price
+                    FROM sales
+                    WHERE deleted=FALSE
+                      AND point_id=$1
+                      AND sale_datetime >= $2
+                      AND sale_datetime < $3
+                    """,
+                    store["point_id"],
+                    start_local,
+                    end_local,
+                )
+
+        def money(value):
+            return round(float(value or 0), 2)
+
+        return {
+            "business_date": day.isoformat(),
+            "store": store["name"],
+            "point_id": store["point_id"],
+            "timezone": settings.business_tz,
+            "window_start": start_local.isoformat(),
+            "window_end": end_local.isoformat(),
+            "stored_business_date": {
+                "payment_rows": stored["payment_rows"],
+                "signed_amount": money(stored["signed_amount"]),
+                "amount_signed_on_fly": money(stored["amount_signed_on_fly"]),
+                "tender_sum": money(stored["tender_sum"]),
+            },
+            "direct_timestamp_window": {
+                "payment_rows": direct["payment_rows"],
+                "signed_amount": money(direct["signed_amount"]),
+                "amount_signed_on_fly": money(direct["amount_signed_on_fly"]),
+                "tender_sum": money(direct["tender_sum"]),
+            },
+            "sale_totalprice_direct_window": {
+                "sales": sale_totals["sales"],
+                "total_price": money(sale_totals["total_price"]),
+            },
+            "shift_buckets": [
+                {
+                    "shift_type": row["shift_type"],
+                    "checks": row["checks"],
+                    "revenue": money(row["revenue"]),
+                    "tender_sum": money(row["tender_sum"]),
+                }
+                for row in shift_buckets
+            ],
+            "hourly": [
+                {
+                    "hour": row["local_hour"],
+                    "checks": row["checks"],
+                    "revenue": money(row["revenue"]),
+                    "tender_sum": money(row["tender_sum"]),
+                }
+                for row in hourly
+            ],
+            "samples": [
+                {
+                    **dict(row),
+                    "amount": money(row["amount"]),
+                    "signed_amount": money(row["signed_amount"]),
+                    "cash_sum": money(row["cash_sum"]),
+                    "bank_sum": money(row["bank_sum"]),
+                    "certificate_sum": money(row["certificate_sum"]),
+                    "salary_sum": money(row["salary_sum"]),
+                    "business_date": row["business_date"].isoformat() if row["business_date"] else None,
+                    "carried_at": row["carried_at"].isoformat() if row["carried_at"] else None,
+                    "local_time": row["local_time"].isoformat() if row["local_time"] else None,
+                }
+                for row in samples
+            ],
         }
 
 
