@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from app.config import get_settings
 from app.db.database import pool
@@ -116,6 +117,46 @@ class WorkShift:
 
 
 class ShiftEngine:
+    def _tz(self) -> ZoneInfo:
+        return ZoneInfo(settings.business_tz)
+
+    def _local(self, dt: datetime) -> datetime:
+        return dt.astimezone(self._tz())
+
+    def _clock_type(self, dt: datetime) -> str:
+        local = self._local(dt)
+        if settings.shift_day_start_hour <= local.hour < settings.shift_night_start_hour:
+            return "DAY"
+        return "NIGHT"
+
+    def _native_anchor(self, events: list[SaleEvent]) -> tuple[date, str, float]:
+        """Anchor the WHOLE native Saby shift before splitting by seller."""
+        types = [self._clock_type(event.when) for event in events]
+        counts = Counter(types)
+        shift_type = "DAY" if counts["DAY"] >= counts["NIGHT"] else "NIGHT"
+        dominant_share = counts[shift_type] / len(events)
+        local_times = [self._local(event.when) for event in events]
+
+        if shift_type == "DAY":
+            dates = [
+                dt.date() for dt in local_times
+                if settings.shift_day_start_hour <= dt.hour < settings.shift_night_start_hour
+            ]
+            if not dates:
+                dates = [dt.date() for dt in local_times]
+            business_date = Counter(dates).most_common(1)[0][0]
+        else:
+            evening_dates = [
+                dt.date() for dt in local_times
+                if dt.hour >= settings.shift_night_start_hour
+            ]
+            if evening_dates:
+                business_date = Counter(evening_dates).most_common(1)[0][0]
+            else:
+                business_date = Counter(dt.date() for dt in local_times).most_common(1)[0][0] - timedelta(days=1)
+
+        return business_date, shift_type, dominant_share
+
     def _signed_amount(self, event: SaleEvent) -> Decimal:
         value = abs(event.amount)
         return -value if event.is_return else value
@@ -244,50 +285,72 @@ class ShiftEngine:
         self,
         events: list[SaleEvent],
     ) -> list[CashShift]:
-        groups: dict[
-            tuple[int, date, str, str],
-            list[SaleEvent],
-        ] = defaultdict(list)
+        # IMPORTANT: group a native Saby shift across clock/business-day
+        # boundaries first. Only then assign operational date/type.
+        native_groups: dict[tuple[int, str], list[SaleEvent]] = defaultdict(list)
 
         for event in events:
             native_key = event.native_shift_key
-
             if not native_key:
                 continue
-
-            # business_date is part of the key intentionally:
-            # one Saby cash shift must never bridge two Причал business days.
-            group_key = (
-                event.point_id,
-                event.business_date,
-                native_key,
-                event.seller_key,
-            )
-
-            groups[group_key].append(event)
+            native_groups[(event.point_id, native_key)].append(event)
 
         result: list[CashShift] = []
 
-        for (
-            point_id,
-            business_date,
-            native_key,
-            seller_key,
-        ), group in groups.items():
+        for (point_id, native_key), native_events in native_groups.items():
+            native_events.sort(key=lambda event: event.when)
+            business_date, shift_type, dominant_share = self._native_anchor(native_events)
 
-            key = (
-                f"native:{point_id}:"
-                f"{business_date.isoformat()}:"
-                f"{native_key}:{seller_key}"
-            )
+            by_seller: dict[str, list[SaleEvent]] = defaultdict(list)
+            for event in native_events:
+                by_seller[event.seller_key].append(event)
 
-            result.append(
-                self._build_cash_shift(
-                    group,
-                    "saby_native",
-                    key,
+            for seller_key, group in by_seller.items():
+                group.sort(key=lambda event: event.when)
+                first = group[0]
+                started_at = group[0].when
+                ended_at = group[-1].when
+                duration_hours = max(0.0, (ended_at - started_at).total_seconds() / 3600)
+                revenue = sum((self._signed_amount(event) for event in group), Decimal("0"))
+
+                native_ids = {e.saby_shift_id for e in group if e.saby_shift_id is not None}
+                native_numbers = {e.saby_shift_number for e in group if e.saby_shift_number}
+                saby_shift_id = next(iter(native_ids)) if len(native_ids) == 1 else None
+                saby_shift_number = next(iter(native_numbers)) if len(native_numbers) == 1 else ""
+
+                status = "AUTO"
+                confidence = 1.0
+                if duration_hours > settings.shift_max_duration_hours:
+                    status = "REVIEW"
+                    confidence = 0.95
+
+                key = (
+                    f"native:{point_id}:{business_date.isoformat()}:"
+                    f"{shift_type}:{native_key}:{seller_key}"
                 )
-            )
+
+                result.append(
+                    CashShift(
+                        key=key,
+                        point_id=point_id,
+                        business_date=business_date,
+                        shift_type=shift_type,
+                        seller_key=seller_key,
+                        seller_id=first.seller_id,
+                        seller_name=first.display_name,
+                        started_at=started_at,
+                        ended_at=ended_at,
+                        check_count=len(group),
+                        net_revenue=revenue,
+                        source="saby_native",
+                        confidence=confidence,
+                        status=status,
+                        saby_shift_id=saby_shift_id,
+                        saby_shift_number=saby_shift_number,
+                        duration_hours=duration_hours,
+                        dominant_share=dominant_share,
+                    )
+                )
 
         return result
 
@@ -537,6 +600,18 @@ class ShiftEngine:
         CarriedWTZ / Amount / Shift / Teller and must be attributed
         independently.
         """
+        tz = self._tz()
+        start_dt = datetime.combine(
+            date_from - timedelta(days=1),
+            datetime.min.time(),
+            tzinfo=tz,
+        )
+        end_dt = datetime.combine(
+            date_to + timedelta(days=2),
+            datetime.min.time(),
+            tzinfo=tz,
+        )
+
         async with pool().acquire() as conn:
             rows = await conn.fetch(
                 """
@@ -546,46 +621,26 @@ class ShiftEngine:
                     p.business_date,
                     p.business_shift_type,
                     p.carried_at,
-
                     p.seller_id,
                     p.seller_name,
-
                     p.signed_amount,
-
                     p.saby_shift_id,
                     p.saby_shift_number,
-
                     p.payment_key
-
                 FROM sale_payments p
-
                 JOIN sales s
                   ON s.point_id=p.point_id
                  AND s.sale_id=p.sale_id
-
                 WHERE s.deleted=FALSE
-
-                  AND p.business_date
-                      BETWEEN $1 AND $2
-
+                  AND p.carried_at >= $1
+                  AND p.carried_at < $2
                   AND p.carried_at IS NOT NULL
-
-                  AND p.business_shift_type
-                      IN ('DAY', 'NIGHT')
-
-                  AND (
-                      p.seller_id IS NOT NULL
-                      OR p.seller_name <> ''
-                  )
-
-                ORDER BY
-                    p.business_date,
-                    p.point_id,
-                    p.carried_at,
-                    p.payment_key
+                  AND p.business_shift_type IN ('DAY', 'NIGHT')
+                  AND (p.seller_id IS NOT NULL OR p.seller_name <> '')
+                ORDER BY p.point_id, p.saby_shift_id NULLS LAST, p.carried_at, p.payment_key
                 """,
-                date_from,
-                date_to,
+                start_dt,
+                end_dt,
             )
 
         events: list[SaleEvent] = []
@@ -624,6 +679,12 @@ class ShiftEngine:
             +
             self._fallback_cash_shifts(events)
         )
+
+        # Only now, after anchoring whole native shifts, select requested dates.
+        cash_shifts = [
+            shift for shift in cash_shifts
+            if date_from <= shift.business_date <= date_to
+        ]
 
         cash_shifts.sort(
             key=lambda item: (
