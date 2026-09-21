@@ -11,6 +11,7 @@ from app.bot.router import router
 from app.config import get_settings
 from app.db.database import close_db, health as db_health, init_db
 from app.services.sync import sync_service
+from app.version import APP_VERSION, BUILD_TAG
 
 
 settings = get_settings()
@@ -82,7 +83,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Причал AI",
-    version="0.2.10",
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 
@@ -91,8 +92,9 @@ app = FastAPI(
 async def root():
     return {
         "service": "prichal-ai",
-        "version": "0.2.10",
+        "version": APP_VERSION,
         "status": "ok",
+        "build": BUILD_TAG,
     }
 
 
@@ -102,6 +104,7 @@ async def health():
     return {
         "ok": True,
         "service": "prichal-ai",
-        "version": "0.2.10",
+        "version": APP_VERSION,
+        "build": BUILD_TAG,
         "database": db,
     }

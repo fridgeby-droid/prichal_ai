@@ -14,6 +14,7 @@ from app.services.analytics import analytics_service
 from app.services.saby import saby_client
 from app.services.sync import sync_service
 from app.services.shift_engine import shift_engine
+from app.version import APP_VERSION, BUILD_TAG
 
 
 router = Router()
@@ -45,7 +46,7 @@ async def start(message: Message) -> None:
         return
 
     await message.answer(
-        "Причал AI v0.2.9 Adaptive Sync ✅\n\n"
+        "Причал AI " + APP_VERSION + " ✅\n\n"
         "Добавлено:\n"
         "• Neon/PostgreSQL;\n"
         "• история Saby;\n"
@@ -69,7 +70,38 @@ async def ping(message: Message) -> None:
     if not _allowed(message):
         await _reject(message)
         return
-    await message.answer("pong ✅ | v0.2")
+    await message.answer(
+        f"pong ✅ | v{APP_VERSION} | {BUILD_TAG}"
+    )
+
+
+@router.message(Command("version"))
+async def version(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    await message.answer(
+        "ℹ️ Причал AI\n"
+        f"version: {APP_VERSION}\n"
+        f"build: {BUILD_TAG}"
+    )
+
+
+@router.message(Command("buildinfo"))
+async def buildinfo(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    await message.answer(
+        "🧩 Build info\n"
+        f"app_version: {APP_VERSION}\n"
+        f"build_tag: {BUILD_TAG}\n"
+        "paymentdebug_handler: DIRECT\n"
+        "business_day: 08:00→08:00\n"
+        "money_source: sale_payments"
+    )
 
 
 @router.message(Command("whoami"))
@@ -474,7 +506,7 @@ async def payment_debug(message: Message) -> None:
         total = data["totals"]
 
         lines = [
-            f"🧾 Payment debug — {data['store']}",
+            f"🧾 DIRECT Payment debug — {data['store']}",
             f"Business date: {data['business_date']}",
             "",
             "ИТОГО",

@@ -1,29 +1,38 @@
-# Причал AI v0.2.10 — Payment Diagnostic
+# Причал AI v0.2.11 — Version Lock
 
-Диагностическая версия. Расчёт смен не меняет.
+Техническая сборка без изменения бизнес-расчёта.
 
-Команда:
+Исправляет путаницу версий:
+- `/ping` больше не захардкожен как `v0.2`;
+- `/start`, FastAPI `/`, `/health` и Telegram используют одну `APP_VERSION`;
+- добавлены `/version` и `/buildinfo`;
+- `/paymentdebug` помечен как `DIRECT`, чтобы было видно, что ответ пришёл
+  из детерминированного SQL-handler, а не от AI-агента.
+
+После деплоя:
+
+```text
+/ping
+/version
+/buildinfo
+```
+
+Ожидается:
+
+```text
+pong ✅ | v0.2.11 | payment-debug-direct
+```
+
+Затем:
 
 ```text
 /paymentdebug Батумская 5 | 2026-09-19
 ```
 
-Показывает по каждому продавцу DAY/NIGHT:
+Ответ должен начинаться:
 
-- всю payment revenue;
-- fiscal-only revenue;
-- Nonfiscal amount/count;
-- returns amount/count.
+```text
+🧾 DIRECT Payment debug — Батумская 5
+```
 
-Отдельно выводит все `Nonfiscal=true` и `is_return=true` payment rows.
-
-Для установки поверх v0.2.9:
-- reset не нужен;
-- sync не нужен;
-- достаточно задеплоить и выполнить `/paymentdebug ...`.
-
-Цель — определить, почему по Батумской:
-- эталон DAY = 19 307,55 ₽;
-- эталон NIGHT = 78 852,33 ₽;
-- в v0.2.9 появились дополнительные 1 482 ₽ у Анферова
-  и +614,90 ₽ у Лаврова.
+Reset и sync для перехода с v0.2.10 не нужны.
