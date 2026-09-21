@@ -1462,5 +1462,302 @@ class AnalyticsService:
             ],
         }
 
+    async def payment_debug(
+        self,
+        store_query: str,
+        date_value: str = "вчера",
+    ) -> dict:
+        day = self.resolve_date(date_value)
+
+        store, error = await self._resolve_store(store_query)
+        if error:
+            return error
+
+        async with pool().acquire() as conn:
+            async with conn.transaction(
+                isolation="repeatable_read",
+                readonly=True,
+            ):
+                grouped = await conn.fetch(
+                    """
+                    SELECT
+                        p.seller_name,
+                        p.business_shift_type,
+
+                        COUNT(*) AS checks,
+
+                        COALESCE(
+                            SUM(p.signed_amount),
+                            0
+                        ) AS revenue_all,
+
+                        COUNT(*) FILTER (
+                            WHERE p.nonfiscal=TRUE
+                        ) AS nonfiscal_checks,
+
+                        COALESCE(
+                            SUM(p.signed_amount) FILTER (
+                                WHERE p.nonfiscal=TRUE
+                            ),
+                            0
+                        ) AS nonfiscal_revenue,
+
+                        COUNT(*) FILTER (
+                            WHERE p.is_return=TRUE
+                        ) AS return_checks,
+
+                        COALESCE(
+                            SUM(p.signed_amount) FILTER (
+                                WHERE p.is_return=TRUE
+                            ),
+                            0
+                        ) AS return_revenue,
+
+                        COALESCE(
+                            SUM(p.signed_amount) FILTER (
+                                WHERE p.nonfiscal=FALSE
+                            ),
+                            0
+                        ) AS fiscal_revenue
+
+                    FROM sale_payments p
+
+                    JOIN sales s
+                      ON s.point_id=p.point_id
+                     AND s.sale_id=p.sale_id
+
+                    WHERE s.deleted=FALSE
+                      AND p.point_id=$1
+                      AND p.business_date=$2
+
+                    GROUP BY
+                        p.seller_name,
+                        p.business_shift_type
+
+                    ORDER BY
+                        p.business_shift_type,
+                        p.seller_name
+                    """,
+                    store["point_id"],
+                    day,
+                )
+
+                totals = await conn.fetchrow(
+                    """
+                    SELECT
+                        COUNT(*) AS checks,
+
+                        COALESCE(
+                            SUM(p.signed_amount),
+                            0
+                        ) AS revenue_all,
+
+                        COUNT(*) FILTER (
+                            WHERE p.nonfiscal=TRUE
+                        ) AS nonfiscal_checks,
+
+                        COALESCE(
+                            SUM(p.signed_amount) FILTER (
+                                WHERE p.nonfiscal=TRUE
+                            ),
+                            0
+                        ) AS nonfiscal_revenue,
+
+                        COUNT(*) FILTER (
+                            WHERE p.is_return=TRUE
+                        ) AS return_checks,
+
+                        COALESCE(
+                            SUM(p.signed_amount) FILTER (
+                                WHERE p.is_return=TRUE
+                            ),
+                            0
+                        ) AS return_revenue,
+
+                        COALESCE(
+                            SUM(p.signed_amount) FILTER (
+                                WHERE p.nonfiscal=FALSE
+                            ),
+                            0
+                        ) AS fiscal_revenue
+
+                    FROM sale_payments p
+
+                    JOIN sales s
+                      ON s.point_id=p.point_id
+                     AND s.sale_id=p.sale_id
+
+                    WHERE s.deleted=FALSE
+                      AND p.point_id=$1
+                      AND p.business_date=$2
+                    """,
+                    store["point_id"],
+                    day,
+                )
+
+                suspicious = await conn.fetch(
+                    """
+                    SELECT
+                        p.seller_name,
+                        p.business_shift_type,
+
+                        p.carried_at,
+                        p.carried_at AT TIME ZONE $3 AS local_time,
+
+                        p.check_number,
+                        p.payment_key,
+
+                        p.amount,
+                        p.signed_amount,
+
+                        p.nonfiscal,
+                        p.is_return,
+
+                        p.saby_shift_id,
+                        p.saby_shift_number,
+
+                        p.raw_json->>'Comment' AS comment,
+                        p.raw_json->>'FiscalNumber' AS fiscal_number,
+                        p.raw_json->>'FiscalSign' AS fiscal_sign,
+                        p.raw_json->>'KKMName' AS kkm_name
+
+                    FROM sale_payments p
+
+                    JOIN sales s
+                      ON s.point_id=p.point_id
+                     AND s.sale_id=p.sale_id
+
+                    WHERE s.deleted=FALSE
+                      AND p.point_id=$1
+                      AND p.business_date=$2
+
+                      AND (
+                          p.nonfiscal=TRUE
+                          OR p.is_return=TRUE
+                      )
+
+                    ORDER BY
+                        p.carried_at,
+                        p.seller_name
+                    """,
+                    store["point_id"],
+                    day,
+                    settings.business_tz,
+                )
+
+                all_rows = await conn.fetch(
+                    """
+                    SELECT
+                        p.seller_name,
+                        p.business_shift_type,
+
+                        p.carried_at,
+                        p.carried_at AT TIME ZONE $3 AS local_time,
+
+                        p.check_number,
+                        p.payment_key,
+
+                        p.amount,
+                        p.signed_amount,
+
+                        p.nonfiscal,
+                        p.is_return,
+
+                        p.saby_shift_id,
+                        p.saby_shift_number
+
+                    FROM sale_payments p
+
+                    JOIN sales s
+                      ON s.point_id=p.point_id
+                     AND s.sale_id=p.sale_id
+
+                    WHERE s.deleted=FALSE
+                      AND p.point_id=$1
+                      AND p.business_date=$2
+
+                    ORDER BY
+                        p.business_shift_type,
+                        p.seller_name,
+                        p.carried_at
+                    """,
+                    store["point_id"],
+                    day,
+                    settings.business_tz,
+                )
+
+        def money(value):
+            return round(float(value or 0), 2)
+
+        return {
+            "business_date": day.isoformat(),
+            "store": store["name"],
+            "point_id": store["point_id"],
+            "timezone": settings.business_tz,
+
+            "totals": {
+                **dict(totals),
+                "revenue_all": money(totals["revenue_all"]),
+                "nonfiscal_revenue": money(totals["nonfiscal_revenue"]),
+                "return_revenue": money(totals["return_revenue"]),
+                "fiscal_revenue": money(totals["fiscal_revenue"]),
+            },
+
+            "grouped": [
+                {
+                    **dict(row),
+                    "revenue_all": money(row["revenue_all"]),
+                    "nonfiscal_revenue": money(
+                        row["nonfiscal_revenue"]
+                    ),
+                    "return_revenue": money(
+                        row["return_revenue"]
+                    ),
+                    "fiscal_revenue": money(
+                        row["fiscal_revenue"]
+                    ),
+                }
+                for row in grouped
+            ],
+
+            "suspicious": [
+                {
+                    **dict(row),
+                    "amount": money(row["amount"]),
+                    "signed_amount": money(row["signed_amount"]),
+                    "carried_at": (
+                        row["carried_at"].isoformat()
+                        if row["carried_at"]
+                        else None
+                    ),
+                    "local_time": (
+                        row["local_time"].isoformat()
+                        if row["local_time"]
+                        else None
+                    ),
+                }
+                for row in suspicious
+            ],
+
+            "all_rows": [
+                {
+                    **dict(row),
+                    "amount": money(row["amount"]),
+                    "signed_amount": money(row["signed_amount"]),
+                    "carried_at": (
+                        row["carried_at"].isoformat()
+                        if row["carried_at"]
+                        else None
+                    ),
+                    "local_time": (
+                        row["local_time"].isoformat()
+                        if row["local_time"]
+                        else None
+                    ),
+                }
+                for row in all_rows
+            ],
+        }
+
 
 analytics_service = AnalyticsService()

@@ -436,6 +436,108 @@ async def money_debug(message: Message) -> None:
         )
 
 
+@router.message(Command("paymentdebug"))
+async def payment_debug(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    raw = (message.text or "").strip()
+    payload = raw[len("/paymentdebug"):].strip()
+
+    if "|" in payload:
+        store_query, date_value = [
+            part.strip()
+            for part in payload.rsplit("|", 1)
+        ]
+    else:
+        store_query = payload.strip()
+        date_value = "вчера"
+
+    if not store_query:
+        await message.answer(
+            "Формат:\n"
+            "/paymentdebug Батумская 5 | 2026-09-19"
+        )
+        return
+
+    try:
+        data = await analytics_service.payment_debug(
+            store_query,
+            date_value,
+        )
+
+        if data.get("error"):
+            await message.answer(str(data))
+            return
+
+        total = data["totals"]
+
+        lines = [
+            f"🧾 Payment debug — {data['store']}",
+            f"Business date: {data['business_date']}",
+            "",
+            "ИТОГО",
+            f"Все payments: {total['revenue_all']:.2f} ₽ "
+            f"/ {total['checks']} чек.",
+            f"Фискальные: {total['fiscal_revenue']:.2f} ₽",
+            f"Nonfiscal: {total['nonfiscal_revenue']:.2f} ₽ "
+            f"/ {total['nonfiscal_checks']} чек.",
+            f"Возвраты: {total['return_revenue']:.2f} ₽ "
+            f"/ {total['return_checks']} чек.",
+            "",
+            "ПО ПРОДАВЦАМ / СМЕНАМ:",
+        ]
+
+        for row in data["grouped"]:
+            icon = "☀️" if row["business_shift_type"] == "DAY" else "🌙"
+
+            lines.append(
+                f"{icon} {row['seller_name'] or '—'}\n"
+                f"all={row['revenue_all']:.2f} ₽ | "
+                f"fiscal={row['fiscal_revenue']:.2f} ₽ | "
+                f"nonfiscal={row['nonfiscal_revenue']:.2f} ₽ "
+                f"({row['nonfiscal_checks']}) | "
+                f"returns={row['return_revenue']:.2f} ₽ "
+                f"({row['return_checks']})"
+            )
+
+        lines.append("")
+        lines.append("ПОДОЗРИТЕЛЬНЫЕ ЧЕКИ:")
+
+        if not data["suspicious"]:
+            lines.append("— нет Nonfiscal/Return чеков")
+        else:
+            for row in data["suspicious"]:
+                flags = []
+
+                if row["nonfiscal"]:
+                    flags.append("NONFISCAL")
+
+                if row["is_return"]:
+                    flags.append("RETURN")
+
+                lines.append(
+                    f"• {row['local_time']} | "
+                    f"{row['seller_name']} | "
+                    f"{row['signed_amount']:.2f} ₽ | "
+                    f"{'/'.join(flags)} | "
+                    f"check={row['check_number'] or '—'} | "
+                    f"fiscal={row['fiscal_number'] or '—'}"
+                )
+
+        text = "\n".join(lines)
+
+        for i in range(0, len(text), 3900):
+            await message.answer(text[i:i+3900])
+
+    except Exception as exc:
+        logger.exception("Payment debug failed")
+        await message.answer(
+            f"⚠️ Payment debug error:\n{exc}"
+        )
+
+
 @router.message(Command("reconcile"))
 async def reconcile_business_day(message: Message) -> None:
     if not _allowed(message):
