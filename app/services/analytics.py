@@ -106,9 +106,24 @@ class AnalyticsService:
                     COUNT(DISTINCT p.point_id) AS stores,
 
                     COALESCE(
-                        SUM(p.signed_amount),
+                        SUM(
+                            CASE
+                                WHEN p.is_return THEN 0
+                                ELSE ABS(p.amount)
+                            END
+                        ),
                         0
                     ) AS net_revenue,
+
+                    COALESCE(
+                        SUM(
+                            CASE
+                                WHEN p.is_return THEN ABS(p.amount)
+                                ELSE 0
+                            END
+                        ),
+                        0
+                    ) AS returns_amount,
 
                     COALESCE(
                         SUM(s.total_discount),
@@ -141,7 +156,7 @@ class AnalyticsService:
                         SUM(
                             CASE
                                 WHEN i.is_return
-                                THEN -ABS(i.total_cost)
+                                THEN 0
                                 ELSE i.total_cost
                             END
                         ),
@@ -197,6 +212,7 @@ class AnalyticsService:
             "sales_checks": checks,
             "return_checks": row["return_checks"],
             "net_revenue": _money(revenue),
+            "returns_amount": _money(row["returns_amount"]),
             "average_check": _money(avg_check),
             "discounts": _money(
                 row["discounts"]
@@ -285,9 +301,24 @@ class AnalyticsService:
                     ) AS return_checks,
 
                     COALESCE(
-                        SUM(p.signed_amount),
+                        SUM(
+                            CASE
+                                WHEN p.is_return THEN 0
+                                ELSE ABS(p.amount)
+                            END
+                        ),
                         0
                     ) AS net_revenue,
+
+                    COALESCE(
+                        SUM(
+                            CASE
+                                WHEN p.is_return THEN ABS(p.amount)
+                                ELSE 0
+                            END
+                        ),
+                        0
+                    ) AS returns_amount,
 
                     COUNT(
                         DISTINCT NULLIF(
@@ -361,6 +392,10 @@ class AnalyticsService:
 
             "net_revenue": _money(
                 revenue
+            ),
+
+            "returns_amount": _money(
+                row["returns_amount"]
             ),
 
             "average_check": _money(
@@ -448,7 +483,7 @@ class AnalyticsService:
                         SUM(
                             CASE
                                 WHEN i.is_return
-                                THEN -ABS(i.quantity)
+                                THEN 0
                                 ELSE i.quantity
                             END
                         ),
@@ -459,7 +494,7 @@ class AnalyticsService:
                         SUM(
                             CASE
                                 WHEN i.is_return
-                                THEN -ABS(i.total_price)
+                                THEN 0
                                 ELSE i.total_price
                             END
                         ),
@@ -470,7 +505,7 @@ class AnalyticsService:
                         SUM(
                             CASE
                                 WHEN i.is_return
-                                THEN -ABS(i.total_cost)
+                                THEN 0
                                 ELSE i.total_cost
                             END
                         ),
@@ -811,8 +846,8 @@ class AnalyticsService:
                             SUM(
                                 CASE
                                     WHEN is_return
-                                    THEN -ABS(total_price)
-                                    ELSE total_price
+                                    THEN 0
+                                    ELSE ABS(total_price)
                                 END
                             ),
                             0
@@ -842,9 +877,24 @@ class AnalyticsService:
                         ) AS no_seller_checks,
 
                         COALESCE(
-                            SUM(p.signed_amount),
+                            SUM(
+                                CASE
+                                    WHEN p.is_return THEN 0
+                                    ELSE ABS(p.amount)
+                                END
+                            ),
                             0
-                        ) AS payment_revenue
+                        ) AS payment_revenue,
+
+                        COALESCE(
+                            SUM(
+                                CASE
+                                    WHEN p.is_return THEN ABS(p.amount)
+                                    ELSE 0
+                                END
+                            ),
+                            0
+                        ) AS returns_amount
 
                     FROM sale_payments p
 
@@ -900,6 +950,9 @@ class AnalyticsService:
 
                     COALESCE(payments.payment_revenue,0)
                         AS payment_revenue,
+
+                    COALESCE(payments.returns_amount,0)
+                        AS returns_amount,
 
                     COALESCE(payments.fallback_payments,0)
                         AS fallback_payments,
@@ -981,6 +1034,7 @@ class AnalyticsService:
 
                     "payment_checks": row["payment_checks"],
                     "payment_revenue": _money(payment_revenue),
+                    "returns_amount": _money(row["returns_amount"]),
 
                     "sale_vs_payment": _money(sale_vs_payment),
 
@@ -1064,9 +1118,24 @@ class AnalyticsService:
                         ) AS fallbacks,
 
                         COALESCE(
-                            SUM(p.signed_amount),
+                            SUM(
+                                CASE
+                                    WHEN p.is_return THEN 0
+                                    ELSE ABS(p.amount)
+                                END
+                            ),
                             0
-                        ) AS payment_revenue
+                        ) AS payment_revenue,
+
+                        COALESCE(
+                            SUM(
+                                CASE
+                                    WHEN p.is_return THEN ABS(p.amount)
+                                    ELSE 0
+                                END
+                            ),
+                            0
+                        ) AS returns_amount
 
                     FROM sale_payments p
 
@@ -1157,6 +1226,9 @@ class AnalyticsService:
                 **dict(payments),
                 "payment_revenue": money(
                     payments["payment_revenue"]
+                ),
+                "returns_amount": money(
+                    payments["returns_amount"]
                 ),
             },
 
@@ -1491,6 +1563,16 @@ class AnalyticsService:
                             0
                         ) AS revenue_all,
 
+                        COALESCE(
+                            SUM(
+                                CASE
+                                    WHEN p.is_return THEN 0
+                                    ELSE ABS(p.amount)
+                                END
+                            ),
+                            0
+                        ) AS sales_revenue,
+
                         COUNT(*) FILTER (
                             WHERE p.nonfiscal=TRUE
                         ) AS nonfiscal_checks,
@@ -1551,6 +1633,16 @@ class AnalyticsService:
                             SUM(p.signed_amount),
                             0
                         ) AS revenue_all,
+
+                        COALESCE(
+                            SUM(
+                                CASE
+                                    WHEN p.is_return THEN 0
+                                    ELSE ABS(p.amount)
+                                END
+                            ),
+                            0
+                        ) AS sales_revenue,
 
                         COUNT(*) FILTER (
                             WHERE p.nonfiscal=TRUE
@@ -1698,6 +1790,7 @@ class AnalyticsService:
             "totals": {
                 **dict(totals),
                 "revenue_all": money(totals["revenue_all"]),
+                "sales_revenue": money(totals["sales_revenue"]),
                 "nonfiscal_revenue": money(totals["nonfiscal_revenue"]),
                 "return_revenue": money(totals["return_revenue"]),
                 "fiscal_revenue": money(totals["fiscal_revenue"]),
@@ -1707,6 +1800,7 @@ class AnalyticsService:
                 {
                     **dict(row),
                     "revenue_all": money(row["revenue_all"]),
+                    "sales_revenue": money(row["sales_revenue"]),
                     "nonfiscal_revenue": money(
                         row["nonfiscal_revenue"]
                     ),

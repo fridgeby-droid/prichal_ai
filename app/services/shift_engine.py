@@ -158,8 +158,11 @@ class ShiftEngine:
         return business_date, shift_type, dominant_share
 
     def _signed_amount(self, event: SaleEvent) -> Decimal:
-        value = abs(event.amount)
-        return -value if event.is_return else value
+        # Business rule: returns remain factual events/checks, but they
+        # neither enter revenue nor reduce revenue.
+        if event.is_return:
+            return Decimal("0")
+        return abs(event.amount)
 
     def _build_cash_shift(
         self,

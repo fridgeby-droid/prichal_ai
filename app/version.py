@@ -1,2 +1,2 @@
-APP_VERSION = "0.2.12"
-BUILD_TAG = "native-shift-anchoring"
+APP_VERSION = "0.2.13"
+BUILD_TAG = "revenue-excludes-returns"

@@ -321,7 +321,8 @@ async def shift_debug(message: Message) -> None:
             f"Saby Shift ID: {p['shift_id_checks']}\n"
             f"Saby payments: {p['saby_payments']}\n"
             f"Fallback sale totals: {p['fallbacks']}\n"
-            f"Выручка payments: {p['payment_revenue']:.2f} ₽\n\n"
+            f"Выручка payments: {p['payment_revenue']:.2f} ₽\n"
+            f"Возвраты отдельно: {p.get('returns_amount', 0):.2f} ₽\n\n"
 
             f"CASH SHIFTS\n"
             f"Сегментов: {cash['total']}\n"
@@ -510,8 +511,9 @@ async def payment_debug(message: Message) -> None:
             f"Business date: {data['business_date']}",
             "",
             "ИТОГО",
-            f"Все payments: {total['revenue_all']:.2f} ₽ "
+            f"Все payments signed: {total['revenue_all']:.2f} ₽ "
             f"/ {total['checks']} чек.",
+            f"Выручка БЕЗ возвратов: {total.get('sales_revenue', 0):.2f} ₽",
             f"Фискальные: {total['fiscal_revenue']:.2f} ₽",
             f"Nonfiscal: {total['nonfiscal_revenue']:.2f} ₽ "
             f"/ {total['nonfiscal_checks']} чек.",
@@ -526,7 +528,8 @@ async def payment_debug(message: Message) -> None:
 
             lines.append(
                 f"{icon} {row['seller_name'] or '—'}\n"
-                f"all={row['revenue_all']:.2f} ₽ | "
+                f"sales={row.get('sales_revenue', 0):.2f} ₽ | "
+                f"all_signed={row['revenue_all']:.2f} ₽ | "
                 f"fiscal={row['fiscal_revenue']:.2f} ₽ | "
                 f"nonfiscal={row['nonfiscal_revenue']:.2f} ₽ "
                 f"({row['nonfiscal_checks']}) | "
@@ -595,8 +598,9 @@ async def reconcile_business_day(message: Message) -> None:
                 f"{icon} {row['store']}\n"
                 f"Sale TotalPrice: {row['sale_total']:.2f} ₽ "
                 f"({row['sale_count']} sales)\n"
-                f"Payments: {row['payment_revenue']:.2f} ₽ "
-                f"({row['payment_checks']} checks)\n"
+                f"Payments revenue: {row['payment_revenue']:.2f} ₽ "
+                f"({row['payment_checks']} rows)\n"
+                f"Возвраты отдельно: {row.get('returns_amount', 0):.2f} ₽\n"
                 f"Sale − Payments: {row['sale_vs_payment']:.2f} ₽\n"
                 f"Work shifts: {row['work_revenue']:.2f} ₽ "
                 f"({row['work_checks']} checks)\n"
