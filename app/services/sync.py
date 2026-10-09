@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from app.services.async_utils import gather_or_cancel
 from app.config import get_settings
 from app.db.database import pool
 from app.services.saby import saby_client
@@ -802,7 +803,7 @@ class SabySyncService:
             semaphore = asyncio.Semaphore(max(1, min(settings.sync_concurrency, 8)))
 
             # Fetch several store-days concurrently.
-            fetched = await asyncio.gather(
+            fetched = await gather_or_cancel(
                 *[
                     self._fetch_job(semaphore, point, day)
                     for point, day in jobs

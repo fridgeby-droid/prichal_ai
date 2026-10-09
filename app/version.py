@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.7"
-BUILD_TAG = "keep-saby-account"
+APP_VERSION = "0.3.8"
+BUILD_TAG = "saby-network-resilience"

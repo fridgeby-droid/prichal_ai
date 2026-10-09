@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -10,11 +11,13 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from app.services.async_utils import gather_or_cancel
 from app.config import get_settings
 
 
 AUTH_URL = "https://online.sbis.ru/oauth/service/"
 API_BASE = "https://api.sbis.ru"
+logger = logging.getLogger(__name__)
 
 
 def _response_shape(value: Any, depth: int = 0) -> Any:
@@ -88,6 +91,42 @@ class SabyClient:
         self.settings = get_settings()
         self._token = TokenCache()
         self._lock = asyncio.Lock()
+        # Shared across every recursively split window, not only store/day jobs.
+        self._requests = asyncio.Semaphore(max(1, min(self.settings.sync_concurrency, 4)))
+
+    async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        for attempt in range(4):
+            delay = float(2 ** attempt)
+            try:
+                async with self._requests:
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=20)) as client:
+                        response = await client.request(method, url, **kwargs)
+                if response.status_code not in {429, 502, 503, 504}:
+                    return response
+                if attempt == 3:
+                    response.raise_for_status()
+                retry_after = response.headers.get("Retry-After", "")
+                if retry_after:
+                    # Do not retry sooner than requested or wait indefinitely.
+                    try:
+                        requested = float(retry_after)
+                    except ValueError:
+                        response.raise_for_status()
+                    if not 0 <= requested <= 30:
+                        response.raise_for_status()
+                    delay = max(delay, requested)
+                reason = f"HTTP {response.status_code}"
+            except (httpx.ConnectError, httpx.TimeoutException,
+                    httpx.ReadError, httpx.RemoteProtocolError) as exc:
+                if attempt == 3:
+                    raise RuntimeError(
+                        f"Saby недоступен после 4 попыток ({type(exc).__name__}). "
+                        "Проверьте сеть/DNS хостинга; затем повторите resume того же запуска."
+                    ) from exc
+                reason = type(exc).__name__
+            logger.warning("Saby request retry %s/4 in %ss: %s", attempt + 2, delay, reason)
+            await asyncio.sleep(delay)
+        raise RuntimeError("Saby request retries exhausted")
 
     def _tz(self) -> ZoneInfo:
         return ZoneInfo(self.settings.business_tz)
@@ -127,10 +166,9 @@ class SabyClient:
                 "secret_key": self.settings.saby_secret_key,
             }
 
-            async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.post(AUTH_URL, json=payload)
-                response.raise_for_status()
-                data = response.json()
+            response = await self._request("POST", AUTH_URL, json=payload)
+            response.raise_for_status()
+            data = response.json()
 
             token = str(data.get("token") or "").strip()
             if not token:
@@ -148,22 +186,12 @@ class SabyClient:
         token = await self._authenticate()
         headers = {"X-SBISAccessToken": token}
 
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.get(
-                f"{API_BASE}{path}",
-                params=params,
-                headers=headers,
-            )
+        response = await self._request("GET", f"{API_BASE}{path}", params=params, headers=headers)
 
         if response.status_code in {401, 403} and retry_auth:
             token = await self._authenticate(force=True)
             headers["X-SBISAccessToken"] = token
-            async with httpx.AsyncClient(timeout=60) as client:
-                response = await client.get(
-                    f"{API_BASE}{path}",
-                    params=params,
-                    headers=headers,
-                )
+            response = await self._request("GET", f"{API_BASE}{path}", params=params, headers=headers)
 
         response.raise_for_status()
         data = response.json()
@@ -333,7 +361,7 @@ class SabyClient:
             midpoint = midpoint.replace(microsecond=0)
             right_start = midpoint + timedelta(seconds=1)
 
-            left, right = await asyncio.gather(
+            left, right = await gather_or_cancel(
                 fetch_window(window_start, midpoint, depth + 1),
                 fetch_window(right_start, window_end, depth + 1),
             )
