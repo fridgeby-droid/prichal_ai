@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+from app.services.shift_engine import shift_engine
 from app.config import get_settings
 from app.db.database import pool
 from app.services.saby import saby_client
@@ -992,6 +993,26 @@ class AnalyticsService:
                 day,
             )
 
+        # Re-derive expected attribution from payment facts without reading or
+        # writing stored shifts. Native shifts stay whole, as in ShiftEngine.
+        expected = {}
+        for shift in await shift_engine.expected_cash_shifts(day, day):
+            totals = expected.setdefault(shift.point_id, [0, Decimal("0")])
+            totals[0] += shift.check_count
+            totals[1] += shift.net_revenue
+
+        # An expected shift must still be checked if both stored shifts and
+        # clock-day payments are absent for its assigned day.
+        rows = list(rows)
+        present = {row["point_id"] for row in rows}
+        for point_id in expected.keys() - present:
+            rows.append(dict(
+                point_id=point_id, store=f"Point #{point_id}", sale_count=0,
+                sale_total=0, payment_checks=0, payment_revenue=0, returns_amount=0,
+                fallback_payments=0, no_seller_checks=0, work_checks=0,
+                work_revenue=0, work_shifts=0, review_shifts=0,
+            ))
+
         result = []
 
         for row in rows:
@@ -1008,12 +1029,15 @@ class AnalyticsService:
             sale_vs_payment = sale_total - payment_revenue
             payment_vs_work = payment_revenue - work_revenue
 
+            expected_checks, expected_revenue = expected.get(row["point_id"], (0, Decimal("0")))
+            expected_vs_work = expected_revenue - work_revenue
+
             payment_work_money_ok = (
-                abs(payment_vs_work) < Decimal("0.01")
+                abs(expected_vs_work) < Decimal("0.01")
             )
 
             payment_work_checks_ok = (
-                row["payment_checks"] == row["work_checks"]
+                expected_checks == row["work_checks"]
             )
 
             work_ok = (
@@ -1042,6 +1066,11 @@ class AnalyticsService:
                     "work_revenue": _money(work_revenue),
 
                     "payment_vs_work": _money(payment_vs_work),
+                    "expected_work_checks": expected_checks,
+                    "expected_work_revenue": _money(expected_revenue),
+                    "expected_vs_work": _money(expected_vs_work),
+                    "attribution_checks_delta": expected_checks - row["payment_checks"],
+                    "attribution_revenue_delta": _money(expected_revenue - payment_revenue),
 
                     "fallback_payments": row["fallback_payments"],
                     "no_seller_checks": row["no_seller_checks"],

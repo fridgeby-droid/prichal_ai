@@ -591,11 +591,11 @@ class ShiftEngine:
         return result
 
 
-    async def rebuild_range(
+    async def expected_cash_shifts(
         self,
         date_from: date,
         date_to: date,
-    ) -> int:
+    ) -> list[CashShift]:
         """
         Builds shifts from payment/check facts, not sale totals.
 
@@ -697,6 +697,11 @@ class ShiftEngine:
                 item.started_at,
             )
         )
+
+        return cash_shifts
+
+    async def rebuild_range(self, date_from: date, date_to: date) -> int:
+        cash_shifts = await self.expected_cash_shifts(date_from, date_to)
 
         work_shifts = self._consolidate_work_shifts(
             cash_shifts
