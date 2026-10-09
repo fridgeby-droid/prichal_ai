@@ -564,3 +564,30 @@ VALUES(
     }'::jsonb
 )
 ON CONFLICT(role, version) DO NOTHING;
+
+-- Retail scope: RC is retained in raw tables but excluded from all retail reads.
+CREATE OR REPLACE VIEW excluded_retail_points AS SELECT 23109 AS point_id;
+CREATE OR REPLACE VIEW retail_stores AS
+    SELECT * FROM stores
+    WHERE point_id NOT IN (SELECT point_id FROM excluded_retail_points);
+CREATE OR REPLACE VIEW retail_sales AS
+    SELECT * FROM sales
+    WHERE point_id NOT IN (SELECT point_id FROM excluded_retail_points);
+CREATE OR REPLACE VIEW retail_sale_payments AS
+    SELECT * FROM sale_payments
+    WHERE point_id NOT IN (SELECT point_id FROM excluded_retail_points);
+CREATE OR REPLACE VIEW retail_sale_items AS
+    SELECT * FROM sale_items
+    WHERE point_id NOT IN (SELECT point_id FROM excluded_retail_points);
+CREATE OR REPLACE VIEW retail_cash_shifts AS
+    SELECT * FROM cash_shifts
+    WHERE point_id NOT IN (SELECT point_id FROM excluded_retail_points);
+CREATE OR REPLACE VIEW retail_employee_work_shifts AS
+    SELECT * FROM employee_work_shifts
+    WHERE point_id NOT IN (SELECT point_id FROM excluded_retail_points);
+CREATE OR REPLACE VIEW retail_seller_shifts AS
+    SELECT * FROM seller_shifts
+    WHERE point_id NOT IN (SELECT point_id FROM excluded_retail_points);
+CREATE OR REPLACE VIEW retail_shift_plans AS
+    SELECT * FROM shift_plans
+    WHERE point_id NOT IN (SELECT point_id FROM excluded_retail_points);

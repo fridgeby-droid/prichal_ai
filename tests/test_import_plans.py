@@ -52,7 +52,7 @@ def test_preview_no_writes_and_repeat_apply_no_duplicates():
             self.rows = {}
             self.inserts = 0
         async def fetch(self, sql, *args):
-            if 'FROM stores' in sql:
+            if 'FROM retail_stores' in sql:
                 return stores
             return self.rows.get(tuple(args), [])
         async def execute(self, sql, *args):
@@ -74,7 +74,7 @@ def test_conflict_late_in_bundle_prevents_any_insert():
         calls = 0
         execute = AsyncMock()
         async def fetch(self, sql, *args):
-            if 'FROM stores' in sql:
+            if 'FROM retail_stores' in sql:
                 return stores
             self.calls += 1
             if self.calls == 64:

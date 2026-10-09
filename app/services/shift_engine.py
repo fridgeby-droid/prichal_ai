@@ -630,8 +630,8 @@ class ShiftEngine:
                     p.saby_shift_id,
                     p.saby_shift_number,
                     p.payment_key
-                FROM sale_payments p
-                JOIN sales s
+                FROM retail_sale_payments p
+                JOIN retail_sales s
                   ON s.point_id=p.point_id
                  AND s.sale_id=p.sale_id
                 WHERE s.deleted=FALSE
@@ -712,7 +712,7 @@ class ShiftEngine:
                 await conn.execute(
                     """
                     DELETE FROM employee_work_shifts
-                    WHERE business_date BETWEEN $1 AND $2
+                    WHERE point_id NOT IN (SELECT point_id FROM excluded_retail_points) AND business_date BETWEEN $1 AND $2
                     """,
                     date_from,
                     date_to,
@@ -721,7 +721,7 @@ class ShiftEngine:
                 await conn.execute(
                     """
                     DELETE FROM cash_shifts
-                    WHERE business_date BETWEEN $1 AND $2
+                    WHERE point_id NOT IN (SELECT point_id FROM excluded_retail_points) AND business_date BETWEEN $1 AND $2
                     """,
                     date_from,
                     date_to,
@@ -878,7 +878,7 @@ class ShiftEngine:
                 await conn.execute(
                     """
                     DELETE FROM seller_shifts
-                    WHERE work_date BETWEEN $1 AND $2
+                    WHERE point_id NOT IN (SELECT point_id FROM excluded_retail_points) AND work_date BETWEEN $1 AND $2
                     """,
                     date_from,
                     date_to,

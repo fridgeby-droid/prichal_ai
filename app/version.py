@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.8"
-BUILD_TAG = "saby-network-resilience"
+APP_VERSION = "0.3.11"
+BUILD_TAG = "exclude-distribution-center"

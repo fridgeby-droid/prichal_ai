@@ -177,7 +177,7 @@ class PayrollService:
                     point_id,
                     name,
                     address
-                FROM stores
+                FROM retail_stores
                 WHERE CAST(point_id AS TEXT)=$1
                    OR LOWER(name) LIKE LOWER($2)
                    OR LOWER(address) LIKE LOWER($2)
@@ -285,8 +285,8 @@ class PayrollService:
                 SELECT
                     p.*,
                     st.name AS store
-                FROM shift_plans p
-                JOIN stores st
+                FROM retail_shift_plans p
+                JOIN retail_stores st
                   ON st.point_id=p.point_id
                 WHERE p.point_id=$1
                   AND p.shift_type=$2
@@ -376,8 +376,8 @@ class PayrollService:
                 SELECT
                     p.*,
                     st.name AS store
-                FROM shift_plans p
-                JOIN stores st
+                FROM retail_shift_plans p
+                JOIN retail_stores st
                   ON st.point_id=p.point_id
                 WHERE ($1::BIGINT IS NULL OR p.point_id=$1)
                   AND ($2::BOOLEAN=FALSE OR p.active=TRUE)
@@ -613,7 +613,7 @@ class PayrollService:
                 SELECT DISTINCT
                     seller_id,
                     seller_name
-                FROM employee_work_shifts
+                FROM retail_employee_work_shifts
                 WHERE seller_id IS NOT NULL
                   AND seller_name <> ''
                 ORDER BY seller_name
@@ -809,7 +809,7 @@ class PayrollService:
                         business_date,
                         shift_type,
                         SUM(net_revenue) AS store_shift_revenue
-                    FROM employee_work_shifts
+                    FROM retail_employee_work_shifts
                     WHERE business_date=$1
                     GROUP BY point_id, business_date, shift_type
                 )
@@ -824,8 +824,8 @@ class PayrollService:
                     ws.net_revenue AS seller_revenue,
                     ws.status AS shift_status,
                     shift_totals.store_shift_revenue
-                FROM employee_work_shifts ws
-                JOIN stores st
+                FROM retail_employee_work_shifts ws
+                JOIN retail_stores st
                   ON st.point_id=ws.point_id
                 JOIN shift_totals
                   ON shift_totals.point_id=ws.point_id

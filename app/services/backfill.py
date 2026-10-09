@@ -30,7 +30,7 @@ class BackfillService:
         if date_to >= current_business_date:
             raise ValueError("Backfill допускает только завершённые business days (после 08:00 следующего дня).")
         async with pool().acquire() as conn:
-            rows = await conn.fetch("SELECT point_id FROM stores ORDER BY point_id")
+            rows = await conn.fetch("SELECT point_id FROM retail_stores ORDER BY point_id")
         if not rows:
             raise ValueError("Сначала загрузите stores: /loadstores или python -m scripts.bootstrap stores")
         return {row["point_id"] for row in rows}

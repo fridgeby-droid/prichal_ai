@@ -36,7 +36,7 @@ class AnalyticsService:
                     MAX(business_date) AS max_date,
                     COUNT(*) AS sales,
                     COUNT(DISTINCT point_id) AS stores
-                FROM sales
+                FROM retail_sales
                 WHERE deleted=FALSE
                   AND business_date IS NOT NULL
                 """
@@ -139,9 +139,9 @@ class AnalyticsService:
                         )
                     ) AS sellers
 
-                FROM sale_payments p
+                FROM retail_sale_payments p
 
-                JOIN sales s
+                JOIN retail_sales s
                   ON s.point_id=p.point_id
                  AND s.sale_id=p.sale_id
 
@@ -165,9 +165,9 @@ class AnalyticsService:
                         0
                     ) AS cost
 
-                FROM sale_items i
+                FROM retail_sale_items i
 
-                JOIN sales s
+                JOIN retail_sales s
                   ON s.point_id=i.point_id
                  AND s.sale_id=i.sale_id
 
@@ -244,7 +244,7 @@ class AnalyticsService:
                     address,
                     locality
 
-                FROM stores
+                FROM retail_stores
 
                 WHERE CAST(point_id AS TEXT)=$1
                    OR LOWER(name) LIKE LOWER($2)
@@ -329,9 +329,9 @@ class AnalyticsService:
                         )
                     ) AS sellers
 
-                FROM sale_payments p
+                FROM retail_sale_payments p
 
-                JOIN sales s
+                JOIN retail_sales s
                   ON s.point_id=p.point_id
                  AND s.sale_id=p.sale_id
 
@@ -362,7 +362,7 @@ class AnalyticsService:
                     status,
                     duration_hours
 
-                FROM employee_work_shifts
+                FROM retail_employee_work_shifts
 
                 WHERE point_id=$1
                   AND business_date=$2
@@ -514,9 +514,9 @@ class AnalyticsService:
                         0
                     ) AS cost
 
-                FROM sale_items i
+                FROM retail_sale_items i
 
-                JOIN sales s
+                JOIN retail_sales s
                   ON s.point_id=i.point_id
                  AND s.sale_id=i.sale_id
 
@@ -613,9 +613,9 @@ class AnalyticsService:
                     ws.status,
                     ws.duration_hours
 
-                FROM employee_work_shifts ws
+                FROM retail_employee_work_shifts ws
 
-                JOIN stores st
+                JOIN retail_stores st
                   ON st.point_id=ws.point_id
 
                 WHERE ws.business_date=$1
@@ -743,9 +743,9 @@ class AnalyticsService:
                     ws.confidence,
                     ws.status
 
-                FROM employee_work_shifts ws
+                FROM retail_employee_work_shifts ws
 
-                JOIN stores st
+                JOIN retail_stores st
                   ON st.point_id=ws.point_id
 
                 WHERE LOWER(ws.seller_name)
@@ -855,7 +855,7 @@ class AnalyticsService:
                             0
                         ) AS sale_total
 
-                    FROM sales
+                    FROM retail_sales
 
                     WHERE deleted=FALSE
                       AND business_date=$1
@@ -898,9 +898,9 @@ class AnalyticsService:
                             0
                         ) AS returns_amount
 
-                    FROM sale_payments p
+                    FROM retail_sale_payments p
 
-                    JOIN sales s
+                    JOIN retail_sales s
                       ON s.point_id=p.point_id
                      AND s.sale_id=p.sale_id
 
@@ -930,7 +930,7 @@ class AnalyticsService:
                             WHERE status <> 'AUTO'
                         ) AS review_shifts
 
-                    FROM employee_work_shifts
+                    FROM retail_employee_work_shifts
 
                     WHERE business_date=$1
 
@@ -974,7 +974,7 @@ class AnalyticsService:
                     COALESCE(work.review_shifts,0)
                         AS review_shifts
 
-                FROM stores st
+                FROM retail_stores st
 
                 LEFT JOIN sale_totals
                   ON sale_totals.point_id=st.point_id
@@ -1181,9 +1181,9 @@ class AnalyticsService:
                             0
                         ) AS returns_amount
 
-                    FROM sale_payments p
+                    FROM retail_sale_payments p
 
-                    JOIN sales s
+                    JOIN retail_sales s
                       ON s.point_id=p.point_id
                      AND s.sale_id=p.sale_id
 
@@ -1211,7 +1211,7 @@ class AnalyticsService:
                             0
                         ) AS revenue
 
-                    FROM cash_shifts
+                    FROM retail_cash_shifts
 
                     WHERE business_date=$1
                     """,
@@ -1249,7 +1249,7 @@ class AnalyticsService:
                             0
                         ) AS revenue
 
-                    FROM employee_work_shifts
+                    FROM retail_employee_work_shifts
 
                     WHERE business_date=$1
                     """,
@@ -1336,8 +1336,8 @@ class AnalyticsService:
                                  )
                             END
                         ),0) AS tender_sum
-                    FROM sale_payments p
-                    JOIN sales s
+                    FROM retail_sale_payments p
+                    JOIN retail_sales s
                       ON s.point_id=p.point_id
                      AND s.sale_id=p.sale_id
                     WHERE s.deleted=FALSE
@@ -1370,8 +1370,8 @@ class AnalyticsService:
                                  )
                             END
                         ),0) AS tender_sum
-                    FROM sale_payments p
-                    JOIN sales s
+                    FROM retail_sale_payments p
+                    JOIN retail_sales s
                       ON s.point_id=p.point_id
                      AND s.sale_id=p.sale_id
                     WHERE s.deleted=FALSE
@@ -1404,8 +1404,8 @@ class AnalyticsService:
                                  )
                             END
                         ),0) AS tender_sum
-                    FROM sale_payments p
-                    JOIN sales s
+                    FROM retail_sale_payments p
+                    JOIN retail_sales s
                       ON s.point_id=p.point_id
                      AND s.sale_id=p.sale_id
                     WHERE s.deleted=FALSE
@@ -1439,8 +1439,8 @@ class AnalyticsService:
                                  )
                             END
                         ),0) AS tender_sum
-                    FROM sale_payments p
-                    JOIN sales s
+                    FROM retail_sale_payments p
+                    JOIN retail_sales s
                       ON s.point_id=p.point_id
                      AND s.sale_id=p.sale_id
                     WHERE s.deleted=FALSE
@@ -1480,8 +1480,8 @@ class AnalyticsService:
                         p.saby_shift_id,
                         p.saby_shift_number,
                         p.seller_name
-                    FROM sale_payments p
-                    JOIN sales s
+                    FROM retail_sale_payments p
+                    JOIN retail_sales s
                       ON s.point_id=p.point_id
                      AND s.sale_id=p.sale_id
                     WHERE s.deleted=FALSE
@@ -1506,7 +1506,7 @@ class AnalyticsService:
                                  THEN -ABS(total_price)
                                  ELSE total_price END
                         ),0) AS total_price
-                    FROM sales
+                    FROM retail_sales
                     WHERE deleted=FALSE
                       AND point_id=$1
                       AND sale_datetime >= $2
@@ -1646,9 +1646,9 @@ class AnalyticsService:
                             0
                         ) AS fiscal_revenue
 
-                    FROM sale_payments p
+                    FROM retail_sale_payments p
 
-                    JOIN sales s
+                    JOIN retail_sales s
                       ON s.point_id=p.point_id
                      AND s.sale_id=p.sale_id
 
@@ -1717,9 +1717,9 @@ class AnalyticsService:
                             0
                         ) AS fiscal_revenue
 
-                    FROM sale_payments p
+                    FROM retail_sale_payments p
 
-                    JOIN sales s
+                    JOIN retail_sales s
                       ON s.point_id=p.point_id
                      AND s.sale_id=p.sale_id
 
@@ -1757,9 +1757,9 @@ class AnalyticsService:
                         p.raw_json->>'FiscalSign' AS fiscal_sign,
                         p.raw_json->>'KKMName' AS kkm_name
 
-                    FROM sale_payments p
+                    FROM retail_sale_payments p
 
-                    JOIN sales s
+                    JOIN retail_sales s
                       ON s.point_id=p.point_id
                      AND s.sale_id=p.sale_id
 
@@ -1802,9 +1802,9 @@ class AnalyticsService:
                         p.saby_shift_id,
                         p.saby_shift_number
 
-                    FROM sale_payments p
+                    FROM retail_sale_payments p
 
-                    JOIN sales s
+                    JOIN retail_sales s
                       ON s.point_id=p.point_id
                      AND s.sale_id=p.sale_id
 

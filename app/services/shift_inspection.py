@@ -39,7 +39,7 @@ async def inspect_shifts(point_id: int, day: date) -> dict:
                 """SELECT id, seller_name, business_date, shift_type, started_at, ended_at,
                           duration_hours, status, source, confidence, check_count,
                           net_revenue, cash_shift_count, cash_shift_keys
-                   FROM employee_work_shifts
+                   FROM retail_employee_work_shifts
                    WHERE point_id=$1 AND business_date=$2 ORDER BY started_at, id""",
                 point_id, day,
             )
@@ -53,7 +53,7 @@ async def inspect_shifts(point_id: int, day: date) -> dict:
                     """SELECT cash_shift_key, saby_shift_id, saby_shift_number, seller_name,
                               business_date, shift_type, started_at, ended_at, duration_hours,
                               status, source, confidence, dominant_share, check_count, net_revenue
-                       FROM cash_shifts WHERE point_id=$1 AND cash_shift_key=ANY($2::text[])
+                       FROM retail_cash_shifts WHERE point_id=$1 AND cash_shift_key=ANY($2::text[])
                        ORDER BY started_at, cash_shift_key""", point_id, keys,
                 )
                 reasons = []

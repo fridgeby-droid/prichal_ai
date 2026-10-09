@@ -71,12 +71,12 @@ async def import_bundle(conn, bundle, apply=False):
     if apply:
         # Prevent duplicate inserts from simultaneous imports/manual setplan.
         await conn.execute('LOCK TABLE shift_plans IN SHARE ROW EXCLUSIVE MODE')
-    stores = await conn.fetch('SELECT point_id, name FROM stores ORDER BY point_id')
+    stores = await conn.fetch('SELECT point_id, name FROM retail_stores ORDER BY point_id')
     plans = resolve_bundle(bundle, stores)
     actions = []
     for plan in plans:
         overlaps = await conn.fetch(
-            '''SELECT valid_from, valid_to, plan_amount FROM shift_plans
+            '''SELECT valid_from, valid_to, plan_amount FROM retail_shift_plans
                WHERE point_id=$1 AND shift_type=$2 AND active=TRUE AND weekday IS NULL
                  AND valid_from <= $4 AND (valid_to IS NULL OR valid_to >= $3)''',
             plan['point_id'], plan['shift_type'], plan['valid_from'], plan['valid_to'])

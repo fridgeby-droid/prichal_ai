@@ -221,6 +221,10 @@ class SabyClient:
             except (TypeError, ValueError):
                 continue
 
+            # Distribution center is outside the retail scope, even if explicitly listed.
+            if point_id == 23109:
+                continue
+
             if allowed and point_id not in allowed:
                 continue
 
