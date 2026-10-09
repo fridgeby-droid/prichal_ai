@@ -404,6 +404,39 @@ ON CONFLICT(point_id, sale_id, item_key) DO UPDATE SET
 
 
 class SabySyncService:
+    async def sync_stores(self) -> list[dict[str, Any]]:
+        """Load only the store directory; never fetch checks or rebuild shifts."""
+        points = await saby_client.list_points()
+        if not points:
+            raise ValueError("Saby вернул пустой список магазинов. Проверьте SABY_POINT_IDS и доступ.")
+        await self._upsert_stores(points)
+        return points
+
+    async def _upsert_stores(self, points: list[dict[str, Any]]) -> None:
+        # Upsert all stores in one batch.
+        store_rows = [
+            (
+                p["id"],
+                p["name"],
+                p.get("address", ""),
+                p.get("locality", ""),
+            )
+            for p in points
+        ]
+        async with pool().acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO stores(point_id, name, address, locality, updated_at)
+                VALUES($1, $2, $3, $4, NOW())
+                ON CONFLICT(point_id) DO UPDATE SET
+                    name=EXCLUDED.name,
+                    address=EXCLUDED.address,
+                    locality=EXCLUDED.locality,
+                    updated_at=NOW()
+                """,
+                store_rows,
+            )
+
     async def sync_recent(self, days: int | None = None) -> dict:
         days = days or settings.sync_recent_days
         days = max(1, min(days, settings.max_manual_sync_days))
@@ -444,12 +477,7 @@ class SabySyncService:
         for order in orders:
             sale_id = _sale_id(order)
             if sale_id is None:
-                logger.warning(
-                    "Skipped Saby order without Sale id: point=%s key=%s",
-                    point["id"],
-                    order.get("Key"),
-                )
-                continue
+                raise ValueError(f"Saby order without Sale id: point={point['id']}")
 
             seller_id = _seller_id(order)
             payment_ctx = _payment_context(order)
@@ -714,9 +742,23 @@ class SabySyncService:
 
         return len(sale_rows), len(item_rows)
 
-    async def sync_range(self, date_from: date, date_to: date) -> dict:
+    async def sync_range(
+        self,
+        date_from: date,
+        date_to: date,
+        *,
+        rebuild_from: date | None = None,
+        rebuild_to: date | None = None,
+        expected_point_ids: set[int] | None = None,
+    ) -> dict:
         if date_to < date_from:
             raise ValueError("date_to cannot be earlier than date_from")
+
+        rebuild_from = rebuild_from or date_from
+        rebuild_to = rebuild_to or date_to
+
+        if rebuild_to < rebuild_from:
+            raise ValueError("rebuild_to cannot be earlier than rebuild_from")
 
         span = (date_to - date_from).days + 1
         if span > settings.max_manual_sync_days:
@@ -744,29 +786,11 @@ class SabySyncService:
             points = await saby_client.list_points()
             stores_count = len(points)
 
-            # Upsert all stores in one batch.
-            store_rows = [
-                (
-                    p["id"],
-                    p["name"],
-                    p.get("address", ""),
-                    p.get("locality", ""),
-                )
-                for p in points
-            ]
-            async with pool().acquire() as conn:
-                await conn.executemany(
-                    """
-                    INSERT INTO stores(point_id, name, address, locality, updated_at)
-                    VALUES($1, $2, $3, $4, NOW())
-                    ON CONFLICT(point_id) DO UPDATE SET
-                        name=EXCLUDED.name,
-                        address=EXCLUDED.address,
-                        locality=EXCLUDED.locality,
-                        updated_at=NOW()
-                    """,
-                    store_rows,
-                )
+            if not points:
+                raise ValueError("Saby вернул пустой список магазинов.")
+            if expected_point_ids is not None and {p["id"] for p in points} != expected_point_ids:
+                raise ValueError("Состав stores изменился. Проверьте SABY_POINT_IDS и повторите загрузку stores.")
+            await self._upsert_stores(points)
 
             days: list[date] = []
             current = date_from
@@ -792,7 +816,7 @@ class SabySyncService:
                 sales_count += s_count
                 items_count += i_count
 
-            shifts_count = await shift_engine.rebuild_range(date_from, date_to)
+            shifts_count = await shift_engine.rebuild_range(rebuild_from, rebuild_to)
 
             async with pool().acquire() as conn:
                 await conn.execute(
@@ -819,6 +843,8 @@ class SabySyncService:
                 "run_id": run_id,
                 "date_from": date_from.isoformat(),
                 "date_to": date_to.isoformat(),
+                "rebuild_from": rebuild_from.isoformat(),
+                "rebuild_to": rebuild_to.isoformat(),
                 "stores": stores_count,
                 "sales_upserted": sales_count,
                 "items_upserted": items_count,

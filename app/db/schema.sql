@@ -328,3 +328,239 @@ CREATE TABLE IF NOT EXISTS app_meta (
     value JSONB NOT NULL DEFAULT '{}'::jsonb,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+
+-- Persistent historical import state.
+-- next_date is the next Причал business date still to process.
+CREATE TABLE IF NOT EXISTS backfill_runs (
+    id BIGSERIAL PRIMARY KEY,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    finished_at TIMESTAMPTZ,
+
+    date_from DATE NOT NULL,
+    date_to DATE NOT NULL,
+    next_date DATE NOT NULL,
+
+    chunk_days INTEGER NOT NULL DEFAULT 7,
+
+    status TEXT NOT NULL DEFAULT 'PENDING'
+        CHECK (
+            status IN (
+                'PENDING',
+                'RUNNING',
+                'PAUSED',
+                'ERROR',
+                'COMPLETED'
+            )
+        ),
+
+    completed_days INTEGER NOT NULL DEFAULT 0,
+    chunks_completed INTEGER NOT NULL DEFAULT 0,
+
+    stores_count INTEGER NOT NULL DEFAULT 0,
+    sales_upserted BIGINT NOT NULL DEFAULT 0,
+    items_upserted BIGINT NOT NULL DEFAULT 0,
+    shifts_built BIGINT NOT NULL DEFAULT 0,
+
+    last_chunk_from DATE,
+    last_chunk_to DATE,
+
+    last_error TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_backfill_runs_status
+    ON backfill_runs(status, id DESC);
+
+
+-- ============================================================
+-- PAYROLL FOUNDATION
+-- ============================================================
+
+-- Store DAY/NIGHT plans.
+-- weekday: NULL = default for all weekdays; 0=Mon ... 6=Sun.
+CREATE TABLE IF NOT EXISTS shift_plans (
+    id BIGSERIAL PRIMARY KEY,
+
+    point_id BIGINT NOT NULL
+        REFERENCES stores(point_id)
+        ON DELETE CASCADE,
+
+    shift_type TEXT NOT NULL
+        CHECK (shift_type IN ('DAY','NIGHT')),
+
+    weekday SMALLINT
+        CHECK (weekday IS NULL OR (weekday BETWEEN 0 AND 6)),
+
+    plan_amount NUMERIC(18, 2) NOT NULL
+        CHECK (plan_amount >= 0),
+
+    valid_from DATE NOT NULL,
+    valid_to DATE,
+
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+
+    source TEXT NOT NULL DEFAULT 'MANUAL',
+    note TEXT NOT NULL DEFAULT '',
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CHECK (valid_to IS NULL OR valid_to >= valid_from)
+);
+
+CREATE INDEX IF NOT EXISTS idx_shift_plans_lookup
+    ON shift_plans(
+        point_id,
+        shift_type,
+        valid_from,
+        valid_to,
+        weekday,
+        active
+    );
+
+
+-- Versioned compensation policy.
+-- Config remains columnar for deterministic payroll plus JSON metadata
+-- for future role-specific extensions.
+CREATE TABLE IF NOT EXISTS payroll_policies (
+    id BIGSERIAL PRIMARY KEY,
+
+    role TEXT NOT NULL
+        CHECK (role IN ('SELLER','NIGHT_ASSISTANT')),
+
+    version INTEGER NOT NULL,
+
+    name TEXT NOT NULL,
+
+    valid_from DATE NOT NULL,
+    valid_to DATE,
+
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+
+    base_per_shift NUMERIC(18, 2) NOT NULL DEFAULT 0,
+
+    -- Seller default: STORE_SHIFT_REVENUE.
+    kpi_basis TEXT NOT NULL DEFAULT 'STORE_SHIFT_REVENUE',
+
+    -- JSON array:
+    -- [{"min_ratio":1.0,"max_ratio":1.25,"percent":0.03}, ...]
+    kpi_tiers JSONB NOT NULL DEFAULT '[]'::jsonb,
+
+    exam_percent NUMERIC(8, 5) NOT NULL DEFAULT 0,
+    exam_basis TEXT NOT NULL DEFAULT 'PERSONAL_MONTH_REVENUE',
+
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    UNIQUE(role, version),
+
+    CHECK (valid_to IS NULL OR valid_to >= valid_from)
+);
+
+CREATE INDEX IF NOT EXISTS idx_payroll_policy_lookup
+    ON payroll_policies(role, valid_from, valid_to, active);
+
+
+-- One identity layer across Saby and Причал Core.
+CREATE TABLE IF NOT EXISTS employee_identity_map (
+    id BIGSERIAL PRIMARY KEY,
+
+    role TEXT NOT NULL
+        CHECK (role IN ('SELLER','NIGHT_ASSISTANT')),
+
+    full_name TEXT NOT NULL,
+
+    saby_seller_id BIGINT,
+    core_employee_id TEXT,
+
+    valid_from DATE NOT NULL DEFAULT CURRENT_DATE,
+    valid_to DATE,
+
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+
+    source TEXT NOT NULL DEFAULT 'MANUAL',
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CHECK (valid_to IS NULL OR valid_to >= valid_from)
+);
+
+CREATE INDEX IF NOT EXISTS idx_employee_identity_saby
+    ON employee_identity_map(saby_seller_id, active);
+
+CREATE INDEX IF NOT EXISTS idx_employee_identity_core
+    ON employee_identity_map(core_employee_id, active);
+
+CREATE INDEX IF NOT EXISTS idx_employee_identity_name
+    ON employee_identity_map(LOWER(full_name), role, active);
+
+
+-- Monthly exam result. month must be first day of month.
+CREATE TABLE IF NOT EXISTS employee_exam_results (
+    id BIGSERIAL PRIMARY KEY,
+
+    identity_id BIGINT NOT NULL
+        REFERENCES employee_identity_map(id)
+        ON DELETE CASCADE,
+
+    month DATE NOT NULL,
+
+    passed BOOLEAN NOT NULL,
+    score NUMERIC(8, 3),
+
+    source TEXT NOT NULL DEFAULT 'MANUAL',
+    note TEXT NOT NULL DEFAULT '',
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    UNIQUE(identity_id, month),
+
+    CHECK (EXTRACT(DAY FROM month) = 1)
+);
+
+
+-- Seed the currently agreed seller policy.
+-- Historical policy is immutable: future changes create v2/v3...
+INSERT INTO payroll_policies(
+    role,
+    version,
+    name,
+    valid_from,
+    valid_to,
+    active,
+    base_per_shift,
+    kpi_basis,
+    kpi_tiers,
+    exam_percent,
+    exam_basis,
+    metadata
+)
+VALUES(
+    'SELLER',
+    1,
+    'Seller Policy v1',
+    DATE '2026-07-01',
+    NULL,
+    TRUE,
+    2000.00,
+    'STORE_SHIFT_REVENUE',
+    '[
+        {"min_ratio": 1.00, "max_ratio": 1.25, "percent": 0.03},
+        {"min_ratio": 1.25, "max_ratio": null, "percent": 0.05}
+    ]'::jsonb,
+    0.03,
+    'PERSONAL_MONTH_REVENUE',
+    '{
+        "description": "Current seller compensation scheme",
+        "returns_in_revenue": false
+    }'::jsonb
+)
+ON CONFLICT(role, version) DO NOTHING;

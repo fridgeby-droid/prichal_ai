@@ -16,13 +16,27 @@ class Settings(BaseSettings):
     saby_max_pages_per_point: int = 30
 
     database_url: str
+    db_schema: str = "prichal_ai"
+    database_ssl_mode: str = "require"
+    database_ssl_ca_b64: str = ""
+    database_ssl_ca_file: str = ""
 
-    auto_sync_enabled: bool = True
-    auto_sync_on_start: bool = True
+    # Timeweb S3 / S3-compatible object storage.
+    s3_enabled: bool = False
+    s3_endpoint_url: str = "https://s3.twcstorage.ru"
+    s3_region: str = "ru-1"
+    s3_bucket: str = ""
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    s3_prefix: str = "prichal-ai/"
+
+    auto_sync_enabled: bool = False
+    auto_sync_on_start: bool = False
     sync_interval_minutes: int = 60
     sync_recent_days: int = 3
     max_manual_sync_days: int = 60
     sync_concurrency: int = 4
+    backfill_chunk_days: int = 7
 
     # Причал business day: 08:00 текущего дня -> 08:00 следующего.
     business_day_start_hour: int = 8

@@ -12,6 +12,10 @@ from app.agent.tools import (
     get_store_sales_summary_live,
     get_top_products_history,
     list_stores,
+    get_shift_plan,
+    get_payroll_policy,
+    get_seller_payroll_preview,
+    get_seller_month_payroll_preview,
 )
 
 
@@ -45,7 +49,7 @@ NIGHT = 20:00–07:59 следующего календарного дня.
    в одну employee work shift.
 5. Для смен source=saby_native является предпочтительным.
 6. fallback_reconstructed используется только если Saby не дал shift identity.
-7. Никогда не рассчитывай зарплату самостоятельно — PayrollEngine появится позже.
+7. Зарплату не считай самостоятельно. Используй только детерминированные PayrollEngine tools. Если отсутствует план/политика/корректная смена — сообщи статус MISSING/REVIEW, не додумывай.
 8. Источник сменной выручки — sale_payments (Saby Payments[].Amount),
    а НЕ sales.TotalPrice. TotalPrice — контрольная сумма продажи.
 9. Перед финансовым использованием смен дата должна пройти reconciliation:
@@ -54,7 +58,15 @@ NIGHT = 20:00–07:59 следующего календарного дня.
    диагностикой. Не сравнивай их напрямую с business-day цифрами без пояснения.
 11. Возвраты не включаются в выручку и не уменьшают её. Показывай сумму и количество возвратов отдельно.
 10. Не придумывай данные и причины.
-11. Пиши по-русски, кратко и управленчески.
+11. Планы смен хранятся в shift_plans. Для конкретной даты:
+   план конкретного weekday имеет приоритет над ALL; затем берётся самая свежая valid_from.
+12. Зарплатные условия хранятся как versioned payroll_policies.
+   Никогда не применяй текущую политику к старой дате, если на ту дату действует другая версия.
+13. Для SELLER KPI определяется выполнением плана всей магазинной DAY/NIGHT-смены,
+   а процент KPI начисляется на личную выручку продавца.
+14. NIGHT_ASSISTANT — отдельная роль. Их смены должны приходить из Причал Core,
+   а не из Saby. Не смешивай их со сменами SELLER.
+15. Пиши по-русски, кратко и управленчески.
 """
 
 executive_agent = Agent(
@@ -72,6 +84,10 @@ executive_agent = Agent(
         get_network_sales_summary_live,
         get_store_sales_summary_live,
         get_core_status,
+        get_shift_plan,
+        get_payroll_policy,
+        get_seller_payroll_preview,
+        get_seller_month_payroll_preview,
     ],
 )
 

@@ -11,9 +11,12 @@ from app.agent.executive import ask_executive_agent
 from app.config import get_settings
 from app.db.database import health as db_health, reset_saby_data
 from app.services.analytics import analytics_service
+from app.services.backfill import backfill_service
 from app.services.saby import saby_client
 from app.services.sync import sync_service
+from app.services.storage import storage
 from app.services.shift_engine import shift_engine
+from app.services.payroll import payroll_service
 from app.version import APP_VERSION, BUILD_TAG
 
 
@@ -24,6 +27,8 @@ logger = logging.getLogger(__name__)
 _agent_semaphore = asyncio.Semaphore(2)
 _sync_lock = asyncio.Lock()
 _current_sync_task: asyncio.Task | None = None
+_current_backfill_task: asyncio.Task | None = None
+_current_backfill_run_id: int | None = None
 
 
 def _allowed(message: Message) -> bool:
@@ -39,6 +44,94 @@ async def _reject(message: Message) -> None:
     )
 
 
+def _backfill_status_text(state: dict) -> str:
+    status_icons = {
+        "PENDING": "⏳",
+        "RUNNING": "🔄",
+        "PAUSED": "⏸",
+        "ERROR": "⚠️",
+        "COMPLETED": "✅",
+    }
+
+    icon = status_icons.get(state["status"], "ℹ️")
+
+    lines = [
+        f"{icon} Backfill #{state['id']} — {state['status']}",
+        f"Период: {state['date_from']} → {state['date_to']}",
+        f"Прогресс: {state['completed_days']}/{state['total_days']} дней "
+        f"({state['progress_percent']:.1f}%)",
+        f"Блоков: {state['chunks_completed']}/"
+        f"~{state['total_chunks_estimate']}",
+        f"Следующая дата: {state['next_date']}",
+        f"Продаж upsert: {state['sales_upserted']}",
+        f"Позиций upsert: {state['items_upserted']}",
+        f"Смен построено: {state['shifts_built']}",
+    ]
+
+    if state.get("last_chunk_from"):
+        lines.append(
+            f"Последний блок: {state['last_chunk_from']} → "
+            f"{state['last_chunk_to']}"
+        )
+
+    if state.get("last_error"):
+        lines.append(f"Ошибка: {state['last_error'][:700]}")
+
+    return "\n".join(lines)
+
+
+async def _run_backfill_for_chat(
+    bot,
+    chat_id: int,
+    run_id: int,
+) -> None:
+    global _current_backfill_task, _current_backfill_run_id
+
+    async def progress(state: dict) -> None:
+        await bot.send_message(
+            chat_id,
+            _backfill_status_text(state),
+        )
+
+    try:
+        final = await backfill_service.run(
+            run_id,
+            progress_callback=progress,
+        )
+
+        if final["status"] == "COMPLETED":
+            await bot.send_message(
+                chat_id,
+                "✅ Историческая загрузка завершена.\n\n"
+                + _backfill_status_text(final),
+            )
+
+    except asyncio.CancelledError:
+        state = await backfill_service.get_run(run_id)
+        await bot.send_message(
+            chat_id,
+            "⏸ Историческая загрузка приостановлена.\n"
+            "Продолжить: /backfillresume\n\n"
+            + (_backfill_status_text(state) if state else ""),
+        )
+
+    except Exception as exc:
+        logger.exception("Backfill task failed")
+
+        state = await backfill_service.get_run(run_id)
+
+        await bot.send_message(
+            chat_id,
+            "⚠️ Историческая загрузка остановилась с ошибкой.\n"
+            "После устранения причины: /backfillresume\n\n"
+            + (_backfill_status_text(state) if state else str(exc)),
+        )
+
+    finally:
+        _current_backfill_task = None
+        _current_backfill_run_id = None
+
+
 @router.message(CommandStart())
 async def start(message: Message) -> None:
     if not _allowed(message):
@@ -48,13 +141,19 @@ async def start(message: Message) -> None:
     await message.answer(
         "Причал AI " + APP_VERSION + " ✅\n\n"
         "Добавлено:\n"
-        "• Neon/PostgreSQL;\n"
+        "• Timeweb PostgreSQL + S3;\n"
         "• история Saby;\n"
         "• позиции чеков;\n"
         "• ShiftEngine DAY/NIGHT;\n"
         "• история смен продавцов.\n\n"
         "Диагностика: /db\n"
         "Ручная синхронизация: /sync 3\n"
+        "Магазины (первый этап): /loadstores\n"
+        "История: /backfill 2026-07-01 2026-09-22\n"
+        "Статус истории: /backfillstatus\n"
+        "Планы: /plans [магазин]\n"
+        "Payroll policy: /paypolicies SELLER\n"
+        "Payroll preview: /payrollpreview 2026-09-19\n"
         "Смены: /shifts вчера\n"
         "Диагностика смен: /shiftdebug вчера\n"
         "Пересборка смен: /rebuildshifts 4\n\n"
@@ -86,6 +185,39 @@ async def version(message: Message) -> None:
         f"version: {APP_VERSION}\n"
         f"build: {BUILD_TAG}"
     )
+
+
+@router.message(Command("infrahealth"))
+async def infra_health(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    try:
+        db = await db_health()
+        s3 = await storage.health()
+        db_icon = "✅" if db.get("ok") else "❌"
+        s3_icon = "✅" if s3.get("ok") else "❌"
+        lines = [
+            "🧱 Infrastructure health",
+            "",
+            f"{db_icon} PostgreSQL",
+            f"DB: {db.get('database_name', '—')}",
+            f"Schema: {db.get('schema', '—')}",
+            f"TLS: {db.get('ssl_mode', '—')}",
+            f"Stores: {db.get('stores', 0)} | Sales: {db.get('sales', 0)} | Shifts: {db.get('shifts', 0)}",
+            "",
+            f"{s3_icon} S3",
+            f"Enabled: {s3.get('enabled', False)}",
+            f"Bucket: {s3.get('bucket', '—')}",
+            f"Prefix: {s3.get('prefix', '—')}",
+        ]
+        if s3.get("error"):
+            lines.append(f"S3 error: {s3['error']}")
+        await message.answer("\n".join(lines))
+    except Exception as exc:
+        logger.exception("Infrastructure health failed")
+        await message.answer(f"⚠️ Infrastructure health error:\n{exc}")
 
 
 @router.message(Command("buildinfo"))
@@ -151,7 +283,7 @@ async def database_status(message: Message) -> None:
         last = coverage.get("last_sync") or {}
 
         await message.answer(
-            "🗄 Neon/PostgreSQL ✅\n\n"
+            "🗄 Timeweb PostgreSQL + S3 ✅\n\n"
             f"Магазинов: {db['stores']}\n"
             f"Продаж: {db['sales']}\n"
             f"Позиций: {db['sale_items']}\n"
@@ -166,12 +298,244 @@ async def database_status(message: Message) -> None:
         await message.answer(f"⚠️ Ошибка PostgreSQL:\n{exc}")
 
 
+
+@router.message(Command("loadstores"))
+async def load_stores(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    if any(task and not task.done() for task in (_current_sync_task, _current_backfill_task)):
+        await message.answer("Сначала дождитесь завершения sync/backfill или приостановите его.")
+        return
+    try:
+        points = await sync_service.sync_stores()
+        text = "Магазины загружены: " + str(len(points)) + "\n" + "\n".join(
+            f"{p['id']}: {p['name']}" for p in points
+        )
+        for offset in range(0, len(text), 3900):
+            await message.answer(text[offset:offset + 3900])
+    except Exception as exc:
+        await message.answer(f"Загрузка stores остановлена: {exc}")
+
+
+@router.message(Command("backfill"))
+async def backfill(message: Message) -> None:
+    global _current_backfill_task, _current_backfill_run_id
+
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    if (
+        _current_backfill_task is not None
+        and not _current_backfill_task.done()
+    ):
+        await message.answer(
+            "⏳ Историческая загрузка уже выполняется.\n"
+            "Статус: /backfillstatus\n"
+            "Пауза: /backfillcancel"
+        )
+        return
+
+    if (
+        _current_sync_task is not None
+        and not _current_sync_task.done()
+    ):
+        await message.answer(
+            "⛔ Сейчас выполняется ручной /sync. "
+            "Сначала завершите или отмените его."
+        )
+        return
+
+    parts = (message.text or "").split()
+
+    if len(parts) not in (2, 3):
+        await message.answer(
+            "Формат:\n"
+            "/backfill 2026-07-01 2026-09-22\n\n"
+            "Если конечную дату не указать:\n"
+            "/backfill 2026-07-01"
+        )
+        return
+
+    from datetime import date, datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    try:
+        date_from = date.fromisoformat(parts[1])
+        date_to = (
+            date.fromisoformat(parts[2])
+            if len(parts) == 3
+            else (datetime.now(ZoneInfo(settings.business_tz))
+                  - timedelta(hours=settings.business_day_start_hour)).date() - timedelta(days=1)
+        )
+    except ValueError:
+        await message.answer(
+            "Дата должна быть в формате YYYY-MM-DD."
+        )
+        return
+
+    if date_to < date_from:
+        await message.answer(
+            "Дата окончания не может быть раньше даты начала."
+        )
+        return
+
+    try:
+        run_id = await backfill_service.create_run(date_from, date_to)
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+
+    _current_backfill_run_id = run_id
+    _current_backfill_task = asyncio.create_task(
+        _run_backfill_for_chat(
+            message.bot,
+            message.chat.id,
+            run_id,
+        )
+    )
+
+    total_days = (date_to - date_from).days + 1
+    estimated_chunks = (
+        total_days + settings.backfill_chunk_days - 1
+    ) // settings.backfill_chunk_days
+
+    warning = ""
+
+    await message.answer(
+        "🚚 Историческая загрузка запущена.\n\n"
+        f"Run: #{run_id}\n"
+        f"Период: {date_from.isoformat()} → {date_to.isoformat()}\n"
+        f"Business dates: {total_days}\n"
+        f"Размер блока: {settings.backfill_chunk_days} дней\n"
+        f"Ориентировочно блоков: {estimated_chunks}\n\n"
+        "На конец каждого блока автоматически забирается ещё "
+        "следующий календарный день для ночной смены.\n\n"
+        "Каждый блок проходит reconcile до сохранения прогресса.\n"
+        "Статус: /backfillstatus\n"
+        "Пауза: /backfillcancel"
+        + warning
+    )
+
+
+@router.message(Command("backfillstatus"))
+async def backfill_status(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    state = await backfill_service.latest_run()
+
+    if not state:
+        await message.answer(
+            "ℹ️ Исторических загрузок ещё нет."
+        )
+        return
+
+    await message.answer(
+        _backfill_status_text(state)
+    )
+
+
+@router.message(Command("backfillcancel"))
+async def backfill_cancel(message: Message) -> None:
+    global _current_backfill_task, _current_backfill_run_id
+
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    if (
+        _current_backfill_task is None
+        or _current_backfill_task.done()
+    ):
+        state = await backfill_service.latest_resumable_run()
+
+        if state and state["status"] == "RUNNING":
+            await backfill_service.pause(state["id"])
+            await message.answer(
+                "⏸ В БД оставался RUNNING backfill без активной задачи. "
+                "Он переведён в PAUSED.\n"
+                "Продолжить: /backfillresume"
+            )
+            return
+
+        await message.answer(
+            "ℹ️ Активной исторической загрузки нет."
+        )
+        return
+
+    _current_backfill_task.cancel()
+
+    await message.answer(
+        "⏸ Команда паузы отправлена. "
+        "Текущий незавершённый блок может откатиться; "
+        "следующий запуск повторит его безопасно."
+    )
+
+
+@router.message(Command("backfillresume"))
+async def backfill_resume(message: Message) -> None:
+    global _current_backfill_task, _current_backfill_run_id
+
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    if (
+        _current_backfill_task is not None
+        and not _current_backfill_task.done()
+    ):
+        await message.answer(
+            "⏳ Backfill уже выполняется."
+        )
+        return
+
+    if (
+        _current_sync_task is not None
+        and not _current_sync_task.done()
+    ):
+        await message.answer(
+            "⛔ Сейчас выполняется ручной /sync."
+        )
+        return
+
+    state = await backfill_service.latest_resumable_run()
+
+    if not state:
+        await message.answer(
+            "ℹ️ Нет незавершённого backfill для продолжения."
+        )
+        return
+
+    run_id = int(state["id"])
+
+    _current_backfill_run_id = run_id
+    _current_backfill_task = asyncio.create_task(
+        _run_backfill_for_chat(
+            message.bot,
+            message.chat.id,
+            run_id,
+        )
+    )
+
+    await message.answer(
+        "▶️ Историческая загрузка продолжена.\n\n"
+        + _backfill_status_text(state)
+    )
+
+
 @router.message(Command("sync"))
 async def manual_sync(message: Message) -> None:
     global _current_sync_task
 
     if not _allowed(message):
         await _reject(message)
+        return
+
+    if _current_backfill_task is not None and not _current_backfill_task.done():
+        await message.answer("Сначала завершите backfill или приостановите его: /backfillcancel")
         return
 
     parts = (message.text or "").split()
@@ -654,6 +1018,15 @@ async def reset_data(message: Message) -> None:
         )
         return
 
+    if (
+        _current_backfill_task is not None
+        and not _current_backfill_task.done()
+    ):
+        await message.answer(
+            "⛔ Сначала приостановите backfill: /backfillcancel"
+        )
+        return
+
     try:
         await reset_saby_data()
 
@@ -671,6 +1044,506 @@ async def reset_data(message: Message) -> None:
         )
 
 
+
+
+@router.message(Command("plans"))
+async def plans(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    payload = (message.text or "")[len("/plans"):].strip()
+
+    try:
+        data = await payroll_service.list_plans(payload)
+
+        if data.get("error"):
+            await message.answer(str(data))
+            return
+
+        rows = data["plans"]
+
+        if not rows:
+            await message.answer(
+                "ℹ️ Планы пока не заведены.\n\n"
+                "Пример:\n"
+                "/setplan Батумская 5 | NIGHT | ALL | 70000 | 2026-09-01"
+            )
+            return
+
+        lines = [
+            f"🎯 Планы — {data['scope']}",
+            "",
+        ]
+
+        for row in rows:
+            valid = row["valid_from"]
+            if row["valid_to"]:
+                valid += f" → {row['valid_to']}"
+            else:
+                valid += " → ∞"
+
+            lines.append(
+                f"#{row['id']} {row['store']} | "
+                f"{row['shift_type']} | {row['weekday']} | "
+                f"{row['plan_amount']:.2f} ₽ | {valid}"
+            )
+
+        text = "\n".join(lines)
+
+        for i in range(0, len(text), 3900):
+            await message.answer(text[i:i+3900])
+
+    except Exception as exc:
+        logger.exception("Plans failed")
+        await message.answer(f"⚠️ Plans error:\n{exc}")
+
+
+@router.message(Command("setplan"))
+async def set_plan(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    from datetime import date
+
+    payload = (message.text or "")[len("/setplan"):].strip()
+    parts = [item.strip() for item in payload.split("|")]
+
+    if len(parts) not in (5, 6):
+        await message.answer(
+            "Формат:\n"
+            "/setplan Магазин | DAY/NIGHT | ALL/ПН..ВС | сумма | valid_from [| valid_to]\n\n"
+            "Пример:\n"
+            "/setplan Батумская 5 | NIGHT | ALL | 70000 | 2026-09-01\n\n"
+            "Пятница-override:\n"
+            "/setplan Батумская 5 | NIGHT | ПТ | 90000 | 2026-09-01"
+        )
+        return
+
+    try:
+        valid_from = date.fromisoformat(parts[4])
+        valid_to = (
+            date.fromisoformat(parts[5])
+            if len(parts) == 6 and parts[5]
+            else None
+        )
+
+        data = await payroll_service.set_plan(
+            parts[0],
+            parts[1],
+            parts[2],
+            parts[3],
+            valid_from,
+            valid_to,
+        )
+
+        if data.get("error"):
+            await message.answer(str(data))
+            return
+
+        await message.answer(
+            "✅ План сохранён\n\n"
+            f"#{data['id']} {data['store']}\n"
+            f"{data['shift_type']} | {data['weekday']}\n"
+            f"{data['plan_amount']:.2f} ₽\n"
+            f"с {data['valid_from']}"
+            + (
+                f" по {data['valid_to']}"
+                if data["valid_to"]
+                else ""
+            )
+        )
+
+    except Exception as exc:
+        logger.exception("Set plan failed")
+        await message.answer(f"⚠️ Set plan error:\n{exc}")
+
+
+@router.message(Command("plan"))
+async def resolve_plan(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    from datetime import date
+
+    payload = (message.text or "")[len("/plan"):].strip()
+    parts = [item.strip() for item in payload.split("|")]
+
+    if len(parts) != 3:
+        await message.answer(
+            "Формат:\n"
+            "/plan Магазин | 2026-09-19 | NIGHT"
+        )
+        return
+
+    try:
+        data = await payroll_service.resolve_plan_for_store(
+            parts[0],
+            date.fromisoformat(parts[1]),
+            parts[2],
+        )
+
+        if data.get("error"):
+            await message.answer(str(data))
+            return
+
+        await message.answer(
+            "🎯 Действующий план\n\n"
+            f"{data['store']}\n"
+            f"{data['business_date']} | {data['shift_type']}\n"
+            f"План: {data['plan_amount']:.2f} ₽\n"
+            f"Правило: {data['weekday']}\n"
+            f"Источник: {data['source']}"
+        )
+
+    except Exception as exc:
+        logger.exception("Resolve plan failed")
+        await message.answer(f"⚠️ Plan error:\n{exc}")
+
+
+@router.message(Command("paypolicies"))
+async def pay_policies(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    role = (message.text or "")[len("/paypolicies"):].strip().upper()
+
+    try:
+        data = await payroll_service.list_policies(role)
+
+        lines = [
+            f"💼 Payroll policies — {data['role']}",
+            "",
+        ]
+
+        if not data["policies"]:
+            lines.append("— политик нет")
+
+        for policy in data["policies"]:
+            tiers = "; ".join(
+                f"{tier['min_ratio']:.2f}→{tier['percent']*100:.1f}%"
+                for tier in policy["kpi_tiers"]
+            )
+
+            valid = policy["valid_from"]
+            if policy["valid_to"]:
+                valid += f" → {policy['valid_to']}"
+            else:
+                valid += " → ∞"
+
+            lines.append(
+                f"{policy['role']} v{policy['version']} | {valid}\n"
+                f"фикс {policy['base_per_shift']:.2f} ₽ | "
+                f"KPI [{tiers or '—'}] | "
+                f"экзамен {policy['exam_percent']*100:.1f}%"
+            )
+
+        await message.answer("\n\n".join(lines))
+
+    except Exception as exc:
+        logger.exception("Policies failed")
+        await message.answer(f"⚠️ Policies error:\n{exc}")
+
+
+@router.message(Command("paypolicy"))
+async def pay_policy(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
+
+    parts = (message.text or "").split()
+
+    if len(parts) not in (2, 3):
+        await message.answer(
+            "Формат:\n"
+            "/paypolicy SELLER [2026-09-19]"
+        )
+        return
+
+    role = parts[1].upper()
+
+    try:
+        for_date = (
+            date.fromisoformat(parts[2])
+            if len(parts) == 3
+            else datetime.now(
+                ZoneInfo(settings.business_tz)
+            ).date()
+        )
+
+        policy = await payroll_service.resolve_policy(
+            role,
+            for_date,
+        )
+
+        if not policy:
+            await message.answer(
+                f"ℹ️ Для {role} на {for_date} политика не найдена."
+            )
+            return
+
+        tiers = "\n".join(
+            f"• от {tier['min_ratio']*100:.0f}%: "
+            f"{tier['percent']*100:.1f}%"
+            for tier in policy["kpi_tiers"]
+        )
+
+        await message.answer(
+            f"💼 {policy['role']} policy v{policy['version']}\n\n"
+            f"Дата: {for_date}\n"
+            f"Фикс/смена: {policy['base_per_shift']:.2f} ₽\n"
+            f"KPI basis: {policy['kpi_basis']}\n"
+            f"{tiers or 'KPI tiers: —'}\n"
+            f"Экзамен: {policy['exam_percent']*100:.1f}% "
+            f"({policy['exam_basis']})"
+        )
+
+    except Exception as exc:
+        logger.exception("Policy failed")
+        await message.answer(f"⚠️ Policy error:\n{exc}")
+
+
+@router.message(Command("setpolicy"))
+async def set_policy(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    from datetime import date
+
+    payload = (message.text or "")[len("/setpolicy"):].strip()
+    parts = [item.strip() for item in payload.split("|")]
+
+    if len(parts) != 5:
+        await message.answer(
+            "Формат:\n"
+            "/setpolicy ROLE | valid_from | base | tiers | exam_percent\n\n"
+            "Пример новой схемы продавцов:\n"
+            "/setpolicy SELLER | 2026-10-01 | 2300 | "
+            "1.00=0.04;1.25=0.06 | 0.03\n\n"
+            "Старая политика автоматически закроется днём ранее."
+        )
+        return
+
+    try:
+        data = await payroll_service.create_policy(
+            parts[0],
+            date.fromisoformat(parts[1]),
+            parts[2],
+            parts[3],
+            parts[4],
+        )
+
+        await message.answer(
+            "✅ Создана новая payroll policy\n\n"
+            f"{data['role']} v{data['version']}\n"
+            f"Действует с {data['valid_from']}\n"
+            f"Фикс: {data['base_per_shift']:.2f} ₽\n"
+            f"Экзамен: {data['exam_percent']*100:.1f}%"
+        )
+
+    except Exception as exc:
+        logger.exception("Set policy failed")
+        await message.answer(f"⚠️ Set policy error:\n{exc}")
+
+
+@router.message(Command("identitysync"))
+async def identity_sync(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    try:
+        data = await payroll_service.sync_seller_identities()
+
+        await message.answer(
+            "👥 Seller identity map\n\n"
+            f"Найдено продавцов: {data['found_sellers']}\n"
+            f"Добавлено: {data['inserted']}\n"
+            f"Обновлено ФИО: {data['updated']}"
+        )
+
+    except Exception as exc:
+        logger.exception("Identity sync failed")
+        await message.answer(f"⚠️ Identity sync error:\n{exc}")
+
+
+@router.message(Command("setexam"))
+async def set_exam(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    from datetime import date
+
+    payload = (message.text or "")[len("/setexam"):].strip()
+    parts = [item.strip() for item in payload.split("|")]
+
+    if len(parts) not in (3, 4):
+        await message.answer(
+            "Формат:\n"
+            "/setexam Фамилия | YYYY-MM | PASS/FAIL [| score]\n\n"
+            "Перед первым использованием: /identitysync"
+        )
+        return
+
+    try:
+        month = date.fromisoformat(parts[1] + "-01")
+        passed = parts[2].upper() in {
+            "PASS",
+            "PASSED",
+            "ДА",
+            "YES",
+            "1",
+            "TRUE",
+        }
+
+        data = await payroll_service.set_exam(
+            parts[0],
+            month,
+            passed,
+            parts[3] if len(parts) == 4 else None,
+        )
+
+        if data.get("error"):
+            await message.answer(str(data))
+            return
+
+        await message.answer(
+            "✅ Экзамен сохранён\n\n"
+            f"{data['employee']}\n"
+            f"{data['month'][:7]}: "
+            f"{'PASS' if data['passed'] else 'FAIL'}"
+            + (
+                f"\nscore: {data['score']}"
+                if data["score"] is not None
+                else ""
+            )
+        )
+
+    except Exception as exc:
+        logger.exception("Set exam failed")
+        await message.answer(f"⚠️ Set exam error:\n{exc}")
+
+
+@router.message(Command("payrollpreview"))
+async def payroll_preview(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    from datetime import date
+
+    parts = (message.text or "").split()
+
+    if len(parts) != 2:
+        await message.answer(
+            "Формат:\n"
+            "/payrollpreview 2026-09-19"
+        )
+        return
+
+    try:
+        data = await payroll_service.seller_daily_preview(
+            date.fromisoformat(parts[1])
+        )
+
+        lines = [
+            f"💰 Seller payroll preview — {data['business_date']}",
+            "KPI trigger: план всей магазинной смены",
+            "KPI начисление: личная выручка продавца",
+            "",
+        ]
+
+        for row in data["rows"]:
+            if row["payroll_status"] != "OK":
+                lines.append(
+                    f"⚠️ {row['store']} {row['shift_type']} — "
+                    f"{row['seller_name']}: {row['payroll_status']}"
+                )
+                continue
+
+            lines.append(
+                f"✅ {row['store']} {row['shift_type']} — {row['seller_name']}\n"
+                f"смена {row['store_shift_revenue']:.2f} / "
+                f"план {row['plan_amount']:.2f} ₽ "
+                f"({row['achievement_percent']:.1f}%)\n"
+                f"личная выручка {row['seller_revenue']:.2f} ₽ | "
+                f"фикс {row['base_pay']:.2f} | "
+                f"KPI {row['kpi_percent']*100:.1f}% = "
+                f"{row['kpi_pay']:.2f} | "
+                f"итого без экзамена {row['shift_pay_without_exam']:.2f} ₽"
+            )
+
+        text = "\n\n".join(lines)
+
+        for i in range(0, len(text), 3900):
+            await message.answer(text[i:i+3900])
+
+    except Exception as exc:
+        logger.exception("Payroll preview failed")
+        await message.answer(f"⚠️ Payroll preview error:\n{exc}")
+
+
+@router.message(Command("payrollmonth"))
+async def payroll_month(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+
+    from datetime import date
+
+    parts = (message.text or "").split()
+
+    if len(parts) != 2:
+        await message.answer(
+            "Формат:\n"
+            "/payrollmonth 2026-09"
+        )
+        return
+
+    try:
+        month = date.fromisoformat(parts[1] + "-01")
+
+        data = await payroll_service.seller_month_preview(month)
+
+        lines = [
+            f"💰 Seller payroll month — {data['month']}",
+            "",
+        ]
+
+        for row in data["rows"]:
+            icon = "✅" if row["status"] == "OK" else "⚠️"
+
+            lines.append(
+                f"{icon} {row['seller_name']}\n"
+                f"смен: {row['shift_count']} | "
+                f"личная выручка: {row['personal_revenue']:.2f} ₽\n"
+                f"фикс: {row['base_pay']:.2f} | "
+                f"KPI: {row['kpi_pay']:.2f} | "
+                f"экзамен: {row['exam_bonus']:.2f} | "
+                f"ИТОГО: {row['total_pay']:.2f} ₽"
+            )
+
+            if row["problems"]:
+                lines.append(
+                    f"проблемных смен: {len(row['problems'])}"
+                )
+
+        text = "\n\n".join(lines)
+
+        for i in range(0, len(text), 3900):
+            await message.answer(text[i:i+3900])
+
+    except Exception as exc:
+        logger.exception("Payroll month failed")
+        await message.answer(f"⚠️ Payroll month error:\n{exc}")
 
 
 @router.message(F.text)

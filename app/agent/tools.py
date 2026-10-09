@@ -5,6 +5,7 @@ from agents.decorators import tool
 from app.db.database import health as db_health
 from app.services.analytics import analytics_service
 from app.services.core import core_client
+from app.services.payroll import payroll_service
 from app.services.saby import saby_client
 
 
@@ -14,7 +15,7 @@ def _dump(data: dict | list) -> str:
 
 @tool
 async def get_database_status() -> str:
-    """Проверить PostgreSQL/Neon и показать покрытие исторических данных."""
+    """Проверить PostgreSQL Timeweb и показать покрытие исторических данных."""
     return _dump(
         {
             "database": await db_health(),
@@ -109,3 +110,99 @@ async def get_store_sales_summary_live(store: str, date: str = "вчера") -> 
 async def get_core_status() -> str:
     """Проверить доступность backend Причал Core. Не изменяет данные."""
     return _dump(await core_client.health())
+
+
+@tool
+async def get_shift_plan(
+    store: str,
+    date: str,
+    shift_type: str,
+) -> str:
+    """Получить действующий план DAY/NIGHT для магазина и business date.
+
+    Args:
+        store: Название/часть названия/pointId.
+        date: YYYY-MM-DD.
+        shift_type: DAY или NIGHT.
+    """
+    from datetime import date as date_type
+
+    return _dump(
+        await payroll_service.resolve_plan_for_store(
+            store,
+            date_type.fromisoformat(date),
+            shift_type,
+        )
+    )
+
+
+@tool
+async def get_payroll_policy(
+    role: str,
+    date: str,
+) -> str:
+    """Получить действующую версию зарплатной политики на дату.
+
+    Args:
+        role: SELLER или NIGHT_ASSISTANT.
+        date: YYYY-MM-DD.
+    """
+    from datetime import date as date_type
+
+    return _dump(
+        (
+            await payroll_service.resolve_policy(
+                role,
+                date_type.fromisoformat(date),
+            )
+        )
+        or {
+            "error": "Политика не найдена.",
+            "role": role,
+            "date": date,
+        }
+    )
+
+
+@tool
+async def get_seller_payroll_preview(
+    date: str,
+) -> str:
+    """Детерминированный preview зарплаты продавцов за business date.
+
+    Использует:
+    - employee_work_shifts;
+    - shift_plans;
+    - versioned SELLER payroll policy.
+
+    Exam bonus сюда не входит — он месячный.
+    """
+    from datetime import date as date_type
+
+    return _dump(
+        await payroll_service.seller_daily_preview(
+            date_type.fromisoformat(date)
+        )
+    )
+
+
+@tool
+async def get_seller_month_payroll_preview(
+    month: str,
+) -> str:
+    """Детерминированный месячный preview зарплаты продавцов.
+
+    Args:
+        month: YYYY-MM.
+    """
+    from datetime import date as date_type
+
+    month_date = date_type.fromisoformat(
+        month.strip() + "-01"
+    )
+
+    return _dump(
+        await payroll_service.seller_month_preview(
+            month_date
+        )
+    )

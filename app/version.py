@@ -1,2 +1,2 @@
-APP_VERSION = "0.2.13"
-BUILD_TAG = "revenue-excludes-returns"
+APP_VERSION = "0.3.2"
+BUILD_TAG = "timeweb-clean-bootstrap"

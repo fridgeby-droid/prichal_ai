@@ -1,0 +1,22 @@
+# v0.3.2 — Timeweb Clean Bootstrap
+
+- Удалён scripts/migrate_postgres.py и параметры старого подключения из .env.example.
+- AUTO_SYNC_ENABLED и AUTO_SYNC_ON_START по умолчанию false.
+- Добавлены CLI `python -m scripts.bootstrap` и Telegram `/loadstores`.
+- Backfill требует stores и завершённые business days; после каждого блока проверяет
+  исходный reconcile, сохраняет отчёт в app_meta и только затем двигает checkpoint.
+- Ошибка/REVIEW оставляет проблемную неделю для повтора. Отмена сохраняет PAUSED.
+- Второй backfill блокируется через PostgreSQL advisory lock. Telegram /sync
+  не запускается во время Telegram backfill.
+- Ответы Saby без orders, повтор страниц, исчерпание лимита, отсутствие Sale ID,
+  пустой либо изменившийся список stores не принимаются за успешную загрузку.
+- Создание схемы транзакционное, без разрешения таблиц из public.
+- Исправлены буквальные символы \\n в сообщениях backfill.
+- Сохранены без изменений schema.sql, ShiftEngine, PayrollEngine,
+  исходная аналитика/reconcile и S3-клиент.
+- Пошаговая инструкция: BOOTSTRAP.md. Правила payroll: README.md.
+
+Проверено локально: 20 тестов pytest, включая импорт приложения и возобновление backfill;
+синтаксическая проверка Python; доступность справки CLI.
+Тесты используют подмены БД/API. Реальная PostgreSQL, Saby и S3 здесь не проверялись.
+При развёртывании начните с контрольной недели и сверки с отчётами Saby.

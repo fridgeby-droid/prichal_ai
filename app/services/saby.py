@@ -131,6 +131,8 @@ class SabyClient:
             },
         )
         points = data.get("salesPoints") or data.get("points") or []
+        if not isinstance(points, list) or len(points) >= 500:
+            raise ValueError("Список stores некорректен или достиг лимита 500; полнота не подтверждена.")
 
         result: list[dict[str, Any]] = []
         allowed = self.settings.saby_points_filter
@@ -217,9 +219,9 @@ class SabyClient:
                 },
             )
 
-            orders = data.get("orders") or []
+            orders = data.get("orders")
             if not isinstance(orders, list):
-                return []
+                raise ValueError("Saby не вернул список orders; загрузка не подтверждена.")
 
             if len(orders) < page_size:
                 return orders
@@ -244,8 +246,10 @@ class SabyClient:
                             "needDiscountInfo": str(need_discount_info).lower(),
                         },
                     )
-                    page_orders = page_data.get("orders") or []
-                    if not isinstance(page_orders, list) or not page_orders:
+                    page_orders = page_data.get("orders")
+                    if not isinstance(page_orders, list):
+                        raise ValueError("Saby не вернул список orders на странице.")
+                    if not page_orders:
                         break
 
                     keys = tuple(
@@ -253,7 +257,7 @@ class SabyClient:
                         for idx, order in enumerate(page_orders)
                     )
                     if keys in seen_signatures:
-                        break
+                        raise ValueError("Saby повторяет страницу orders; полнота загрузки не подтверждена.")
                     seen_signatures.add(keys)
 
                     new_count = 0
@@ -265,8 +269,12 @@ class SabyClient:
                         result.append(order)
                         new_count += 1
 
-                    if len(page_orders) < page_size or new_count == 0:
+                    if len(page_orders) < page_size:
                         break
+                    if new_count == 0:
+                        raise ValueError("Saby не добавляет новые orders; полнота загрузки не подтверждена.")
+                else:
+                    raise ValueError("Достигнут SABY_MAX_PAGES_PER_POINT; полнота загрузки не подтверждена.")
 
                 return result
 

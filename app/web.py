@@ -11,6 +11,7 @@ from app.bot.router import router
 from app.config import get_settings
 from app.db.database import close_db, health as db_health, init_db
 from app.services.sync import sync_service
+from app.services.storage import storage
 from app.version import APP_VERSION, BUILD_TAG
 
 
@@ -101,10 +102,12 @@ async def root():
 @app.get("/health")
 async def health():
     db = await db_health()
+    s3 = await storage.health()
     return {
-        "ok": True,
+        "ok": bool(db.get("ok")) and bool(s3.get("ok")),
         "service": "prichal-ai",
         "version": APP_VERSION,
         "build": BUILD_TAG,
         "database": db,
+        "s3": s3,
     }
