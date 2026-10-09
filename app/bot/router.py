@@ -146,6 +146,7 @@ async def start(message: Message) -> None:
         "• позиции чеков;\n"
         "• ShiftEngine DAY/NIGHT;\n"
         "• история смен продавцов.\n\n"
+        "Сводка продаж: /daily [дата]\n"
         "Диагностика: /db\n"
         "Ручная синхронизация: /sync 3\n"
         "Магазины (первый этап): /loadstores\n"
@@ -1571,6 +1572,24 @@ async def payroll_month(message: Message) -> None:
     except Exception as exc:
         logger.exception("Payroll month failed")
         await message.answer(f"⚠️ Payroll month error:\n{exc}")
+
+
+@router.message(Command("daily"))
+async def daily_summary(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    from app.services.daily_report import daily_report, format_report
+    parts = (message.text or "").split(maxsplit=1)
+    try:
+        data = await daily_report(parts[1] if len(parts) > 1 else None)
+        for chunk in format_report(data):
+            await message.answer(chunk)
+    except ValueError as exc:
+        await message.answer(f"{exc}\nФормат: /daily или /daily 2026-10-08")
+    except Exception:
+        logger.exception("Daily report failed")
+        await message.answer("Не удалось получить сводку. Проверьте подключение к базе и журнал приложения.")
 
 
 @router.message(F.text)

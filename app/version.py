@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.11"
-BUILD_TAG = "exclude-distribution-center"
+APP_VERSION = "0.3.12"
+BUILD_TAG = "daily-core-directories"

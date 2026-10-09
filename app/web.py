@@ -9,6 +9,7 @@ from fastapi import FastAPI
 
 from app.bot.router import router
 from app.config import get_settings
+from app.core_api import router as core_api_router
 from app.db.database import close_db, health as db_health, init_db
 from app.services.sync import sync_service
 from app.services.storage import storage
@@ -88,6 +89,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+app.include_router(core_api_router)
 
 @app.get("/")
 async def root():

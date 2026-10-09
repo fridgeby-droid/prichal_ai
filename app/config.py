@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -53,6 +54,8 @@ class Settings(BaseSettings):
 
     # Several Saby cash shifts may belong to one paid employee work shift.
     work_shift_merge_gap_hours: float = 4.0
+
+    core_directory_api_key: SecretStr = SecretStr("")
 
     core_base_url: str = ""
     core_api_token: str = ""
