@@ -5,12 +5,11 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
-from scripts.import_plans import resolve_bundle, classify, import_bundle
+from scripts.import_plans import resolve_bundle, classify, import_bundle, load_bundle
 
 
 def bundle_and_stores():
-    path = Path(__file__).resolve().parents[1] / 'data/plans-2026-07-09.json'
-    bundle = json.loads(path.read_text(encoding='utf-8'))
+    bundle = load_bundle()
     # Synthetic ID for the lookup-only store; never shipped in the plan data.
     stores = [dict(point_id=v['point_id'] or 999999, name=v['name']) for v in bundle['stores'].values()]
     return bundle, stores
@@ -85,3 +84,10 @@ def test_conflict_late_in_bundle_prevents_any_insert():
     with pytest.raises(ValueError, match='Конфликт'):
         asyncio.run(import_bundle(conn, bundle, True))
     assert all('INSERT' not in call.args[0] for call in conn.execute.await_args_list)
+
+
+def test_plan_loading_does_not_require_data_directory(monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise FileNotFoundError('/app/data/plans-2026-07-09.json')
+    monkeypatch.setattr(Path, 'read_text', unavailable)
+    assert len(load_bundle()['plans']) == 64
