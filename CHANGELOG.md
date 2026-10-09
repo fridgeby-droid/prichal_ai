@@ -1,3 +1,7 @@
+# v0.3.3 — Saby response diagnostics
+
+Добавлены контекст и структура неожиданного ответа Saby без значений полей. Причина сбоя на реальном API ещё не установлена. Инструкция: SABY_DIAGNOSTICS.md. Проверено 29 тестов; реальный Saby не вызывался.
+
 # v0.3.2 — Timeweb Clean Bootstrap
 
 - Удалён scripts/migrate_postgres.py и параметры старого подключения из .env.example.

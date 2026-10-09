@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.2"
-BUILD_TAG = "timeweb-clean-bootstrap"
+APP_VERSION = "0.3.3"
+BUILD_TAG = "saby-response-diagnostics"

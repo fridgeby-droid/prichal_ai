@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -14,6 +15,41 @@ from app.config import get_settings
 
 AUTH_URL = "https://online.sbis.ru/oauth/service/"
 API_BASE = "https://api.sbis.ru"
+
+
+def _response_shape(value: Any, depth: int = 0) -> Any:
+    """Only field names/types; never log credentials or transaction values."""
+    if value is None:
+        return "null"
+    if isinstance(value, dict):
+        if depth >= 3:
+            return "object"
+        return {str(key)[:80]: _response_shape(item, depth + 1)
+                for key, item in list(value.items())[:30]}
+    if isinstance(value, list):
+        return {"type": "array", "length": len(value)}
+    return type(value).__name__
+
+
+def _extract_orders(data: dict[str, Any], *, point_id: int,
+                    window_from: str, window_to: str, page: int) -> list[dict[str, Any]]:
+    # Keep missing/null distinct from an explicitly empty list. The public API
+    # contract documents an array, not a null/missing empty-day response.
+    has_error = any(data.get(key) not in (None, False, "", [], {})
+                    for key in ("error", "errors", "Error", "Errors"))
+    has_error = has_error or data.get("success") is False
+    orders = data.get("orders")
+    if not has_error and isinstance(orders, list) and all(isinstance(row, dict) for row in orders):
+        return orders
+    detail = {
+        "point_id": point_id, "from": window_from, "to": window_to, "page": page,
+        "orders_present": "orders" in data, "error_marker": has_error,
+        "response_shape": _response_shape(data),
+    }
+    raise ValueError(
+        "SABY_RESPONSE_INVALID: ожидался массив orders; прогресс не изменён. "
+        + json.dumps(detail, ensure_ascii=False)
+    )
 
 
 def _dec(value: Any) -> Decimal:
@@ -219,9 +255,8 @@ class SabyClient:
                 },
             )
 
-            orders = data.get("orders")
-            if not isinstance(orders, list):
-                raise ValueError("Saby не вернул список orders; загрузка не подтверждена.")
+            orders = _extract_orders(data, point_id=point_id,
+                                     window_from=fmt(window_start), window_to=fmt(window_end), page=0)
 
             if len(orders) < page_size:
                 return orders
@@ -246,9 +281,9 @@ class SabyClient:
                             "needDiscountInfo": str(need_discount_info).lower(),
                         },
                     )
-                    page_orders = page_data.get("orders")
-                    if not isinstance(page_orders, list):
-                        raise ValueError("Saby не вернул список orders на странице.")
+                    page_orders = _extract_orders(page_data, point_id=point_id,
+                                                  window_from=fmt(window_start),
+                                                  window_to=fmt(window_end), page=page)
                     if not page_orders:
                         break
 
