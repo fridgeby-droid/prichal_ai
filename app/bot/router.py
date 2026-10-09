@@ -996,7 +996,9 @@ async def reconcile_business_day(message: Message) -> None:
                 f"Чеки по правилам смен: {row['expected_work_checks']}\n"
                 f"Fallback: {row['fallback_payments']} | "
                 f"без Seller: {row['no_seller_checks']} | "
-                f"review shifts: {row['review_shifts']}"
+                f"review shifts: {row['review_shifts']} | "
+                f"блокирующих: {row['blocking_review_shifts']} | "
+                f"длинных смен с учёткой Saby: {len(row['warnings'])}"
             )
 
         lines.append(

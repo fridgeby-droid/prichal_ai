@@ -3,10 +3,32 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from app.config import get_settings
 from app.db.database import pool
+
+
+def keep_saby_account_warning(item: dict, max_hours: float) -> bool:
+    """Owner decision: retain Saby attribution; duration-only native REVIEW is advisory."""
+    cash = item.get("cash_components", [])
+    if not (item.get("status") == "REVIEW" and item.get("source") == "saby_native"
+            and float(item.get("duration_hours", 0)) > max_hours and cash
+            and not item.get("missing_cash_shift_keys")
+            and len(cash) == item.get("cash_shift_count")):
+        return False
+    for component in cash:
+        if component.get("source") != "saby_native":
+            return False
+        if component.get("status") != "AUTO" and not (
+            component.get("status") == "REVIEW"
+            and float(component.get("duration_hours", 0)) > max_hours
+        ):
+            return False
+    return (sum(c["check_count"] for c in cash) == item["check_count"]
+            and sum((Decimal(str(c["net_revenue"])) for c in cash), Decimal("0"))
+            == Decimal(str(item["net_revenue"])))
 
 
 async def inspect_shifts(point_id: int, day: date) -> dict:

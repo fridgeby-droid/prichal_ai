@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.6"
-BUILD_TAG = "shift-review-inspection"
+APP_VERSION = "0.3.7"
+BUILD_TAG = "keep-saby-account"

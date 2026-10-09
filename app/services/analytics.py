@@ -5,6 +5,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from app.services.shift_engine import shift_engine
+from app.services.shift_inspection import inspect_shifts, keep_saby_account_warning
 from app.config import get_settings
 from app.db.database import pool
 from app.services.saby import saby_client
@@ -1040,11 +1041,23 @@ class AnalyticsService:
                 expected_checks == row["work_checks"]
             )
 
+            duration_warnings = []
+            if row["review_shifts"]:
+                inspection = await inspect_shifts(row["point_id"], day)
+                duration_warnings = [
+                    {"work_shift_id": item["id"], "seller_name": item["seller_name"],
+                     "duration_hours": float(item["duration_hours"]),
+                     "code": "LONG_NATIVE_SHIFT_KEEP_SABY_ACCOUNT"}
+                    for item in inspection["work_shifts"]
+                    if keep_saby_account_warning(item, settings.shift_max_duration_hours)
+                ]
+            blocking_reviews = max(0, row["review_shifts"] - len(duration_warnings))
+
             work_ok = (
                 payment_work_money_ok
                 and payment_work_checks_ok
                 and row["no_seller_checks"] == 0
-                and row["review_shifts"] == 0
+                and blocking_reviews == 0
                 and row["fallback_payments"] == 0
             )
 
@@ -1077,6 +1090,8 @@ class AnalyticsService:
 
                     "work_shifts": row["work_shifts"],
                     "review_shifts": row["review_shifts"],
+                    "blocking_review_shifts": blocking_reviews,
+                    "warnings": duration_warnings,
 
                     "status": (
                         "OK"
