@@ -656,6 +656,27 @@ async def shifts(message: Message) -> None:
 
 
 
+@router.message(Command("shiftinspect"))
+async def shift_inspect(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    from datetime import date
+    import json
+    from app.services.shift_inspection import inspect_shifts
+    parts = (message.text or "").split()
+    if len(parts) != 3:
+        await message.answer("Формат: /shiftinspect 5598 2026-07-10")
+        return
+    try:
+        report = await inspect_shifts(int(parts[1]), date.fromisoformat(parts[2]))
+        text = json.dumps(report, ensure_ascii=False, indent=2, default=str)
+        for offset in range(0, len(text), 3900):
+            await message.answer(text[offset:offset + 3900])
+    except Exception as exc:
+        await message.answer(f"Не удалось прочитать смену: {exc}")
+
+
 @router.message(Command("shiftdebug"))
 async def shift_debug(message: Message) -> None:
     if not _allowed(message):

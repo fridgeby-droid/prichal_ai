@@ -27,6 +27,9 @@ async def execute(args):
                     "backfill": await backfill_service.latest_run()})
         elif args.command == "stores":
             output(await sync_service.sync_stores())
+        elif args.command == "shift-report":
+            from app.services.shift_inspection import inspect_shifts
+            output(await inspect_shifts(args.point_id, args.day))
         elif args.command == "backfill":
             run_id = await backfill_service.create_run(args.date_from, args.date_to, chunk_days=7)
             output({"created_run_id": run_id})
@@ -64,6 +67,9 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("init-db", "status", "stores"):
         commands.add_parser(name)
+    inspection = commands.add_parser("shift-report")
+    inspection.add_argument("point_id", type=int)
+    inspection.add_argument("day", type=date.fromisoformat)
     load = commands.add_parser("backfill")
     load.add_argument("date_from", type=date.fromisoformat)
     load.add_argument("date_to", type=date.fromisoformat)
