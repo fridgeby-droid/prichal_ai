@@ -33,17 +33,31 @@ def _response_shape(value: Any, depth: int = 0) -> Any:
 
 def _extract_orders(data: dict[str, Any], *, point_id: int,
                     window_from: str, window_to: str, page: int) -> list[dict[str, Any]]:
-    # Keep missing/null distinct from an explicitly empty list. The public API
-    # contract documents an array, not a null/missing empty-day response.
+    # Observed on the live account: orders={} with outcome.hasMore.
+    # Accept that empty representation only when the response is terminal.
     has_error = any(data.get(key) not in (None, False, "", [], {})
                     for key in ("error", "errors", "Error", "Errors"))
     has_error = has_error or data.get("success") is False
     orders = data.get("orders")
-    if not has_error and isinstance(orders, list) and all(isinstance(row, dict) for row in orders):
+    outcome = data.get("outcome")
+    has_more = outcome.get("hasMore") if isinstance(outcome, dict) else None
+    marker_valid = (
+        "outcome" not in data or (
+            isinstance(outcome, dict) and (
+                "hasMore" not in outcome or type(has_more) is bool
+            )
+        )
+    )
+    if not has_error and marker_valid and isinstance(orders, dict) and not orders and has_more is False:
+        return []
+    if (not has_error and marker_valid and isinstance(orders, list)
+            and all(isinstance(row, dict) for row in orders)
+            and not (not orders and has_more is True)):
         return orders
     detail = {
         "point_id": point_id, "from": window_from, "to": window_to, "page": page,
         "orders_present": "orders" in data, "error_marker": has_error,
+        "has_more": has_more if type(has_more) is bool else "missing_or_invalid",
         "response_shape": _response_shape(data),
     }
     raise ValueError(
@@ -258,7 +272,7 @@ class SabyClient:
             orders = _extract_orders(data, point_id=point_id,
                                      window_from=fmt(window_start), window_to=fmt(window_end), page=0)
 
-            if len(orders) < page_size:
+            if len(orders) < page_size and (data.get("outcome") or {}).get("hasMore") is not True:
                 return orders
 
             window_seconds = int((window_end - window_start).total_seconds())
@@ -304,7 +318,8 @@ class SabyClient:
                         result.append(order)
                         new_count += 1
 
-                    if len(page_orders) < page_size:
+                    if (len(page_orders) < page_size
+                            and (page_data.get("outcome") or {}).get("hasMore") is not True):
                         break
                     if new_count == 0:
                         raise ValueError("Saby не добавляет новые orders; полнота загрузки не подтверждена.")

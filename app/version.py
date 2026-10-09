@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.3"
-BUILD_TAG = "saby-response-diagnostics"
+APP_VERSION = "0.3.4"
+BUILD_TAG = "saby-empty-orders-fix"
