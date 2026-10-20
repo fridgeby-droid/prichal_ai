@@ -1,6 +1,7 @@
 import asyncio
 import json
 from unittest.mock import AsyncMock
+import httpx
 
 from scripts import diagnose_price_lists as d
 
@@ -26,3 +27,22 @@ def test_exception_diagnostic_restores_client(monkeypatch, capsys):
     assert d.service.saby_client._get is getter
     output = json.loads(capsys.readouterr().out)
     assert output["diagnostics"][0]["response"]["priceLists"]["type"] == "dict"
+
+
+def test_http_failure_status_without_secrets(monkeypatch, capsys):
+    response = httpx.Response(400, json={"code": 42, "error": "SECRET"},
+                             request=httpx.Request("GET", "https://example.org/?token=SECRET"))
+    getter = AsyncMock(side_effect=httpx.HTTPStatusError("SECRET", request=response.request,
+                                                       response=response))
+    monkeypatch.setattr(d.service.saby_client, "_get", getter)
+    async def broken(*args):
+        return await d.service.saby_client._get("/retail/v2/nomenclature/list",
+                                               {"pointId": 23109, "priceListId": 66})
+    monkeypatch.setattr(d.service, "get_price", broken)
+    assert asyncio.run(d.run("23109", "66")) == 1
+    text = capsys.readouterr().out
+    assert "SECRET" not in text and "example.org" not in text
+    entry = json.loads(text)["diagnostics"][0]
+    assert entry["http_status"] == 400
+    assert entry["numeric_error_codes"] == {"code": 42}
+    assert d.service.saby_client._get is getter

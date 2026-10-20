@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import json
 import sys
+import httpx
 
 from app.services import price_lists as service
 
@@ -67,8 +68,34 @@ async def run(point_id, price_id):
         history.append(entry)
         if len(history) > 2:
             history.pop(0)
-        data = await original(path, params, *args, **kwargs)
         key = "priceLists" if entry["stage"] == "price_lists" else "nomenclatures"
+        entry["request_parameters"] = {
+            k: v for k, v in params.items()
+            if k in {"pointId", "priceListId", "page", "pageSize", "order",
+                     "position", "noStopList", "withBalance", "withBarcode"}
+        }
+        try:
+            data = await original(path, params, *args, **kwargs)
+        except httpx.HTTPStatusError as exc:
+            entry["http_status"] = exc.response.status_code
+            content_type = exc.response.headers.get("content-type", "").split(";")[0].lower()
+            entry["response_kind"] = (
+                "json" if content_type in {"application/json", "application/problem+json"}
+                else "html" if content_type == "text/html" else "other"
+            )
+            try:
+                body = exc.response.json()
+            except ValueError:
+                body = None
+            if body is not None:
+                entry["response"] = response_shape(body, key)
+                if isinstance(body, dict):
+                    # Numeric error codes only; never echo source messages or URLs.
+                    entry["numeric_error_codes"] = {
+                        k: body[k] for k in ("code", "errorCode", "status")
+                        if type(body.get(k)) is int
+                    }
+            raise
         entry["response"] = response_shape(data, key)
         return data
 
