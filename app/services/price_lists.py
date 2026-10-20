@@ -166,9 +166,14 @@ async def get_price(point, price_id):
             if cursor in seen_positions:
                 raise ExportError("SABY_PAGINATION_OVERLAP")
             seen_positions.add(cursor)
-            if type(row.get("isParent")) is not bool:
+            # Live Saby Retail response: leaf products have explicit null;
+            # folders have true and may have null id/unit/images.
+            # Missing markers and non-boolean values remain invalid.
+            if "isParent" not in row or (
+                row["isParent"] is not None and type(row["isParent"]) is not bool
+            ):
                 raise ExportError()
-            if row["isParent"]:
+            if row["isParent"] is True:
                 folders += 1
                 continue
             images = row.get("images", [])

@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.14"
-BUILD_TAG = "core-price-lists"
+APP_VERSION = "0.3.15"
+BUILD_TAG = "core-price-lists-null-leaves"

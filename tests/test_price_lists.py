@@ -62,6 +62,45 @@ def test_over_thousand_cursor(monkeypatch):
     assert asyncio.run(s.get_price("23109", "66"))["product_count"] == 1002
 
 
+def test_live_nullable_leaves_and_folder_cursor(monkeypatch):
+    leaf = product(2)
+    leaf.update(isParent=None, images=None)
+    pictured = product(3)
+    pictured["isParent"] = None
+    folder = dict(id=None, name="Раздел", unit=None, images=None,
+                  isParent=True, hierarchicalId=4)
+    fetch = mock_pages(monkeypatch, [
+        page([leaf, folder], True), page([pictured]),
+    ])
+    result = asyncio.run(s.get_price("23109", "66"))
+    assert result["complete_snapshot"] is True
+    assert result["product_count"] == 2 and result["folders_skipped"] == 1
+    assert result["products"][0]["images"] == []
+    assert len(result["products"][1]["images"]) == 1
+    assert fetch.call_args_list[2].args[1]["position"] == 4
+
+
+@pytest.mark.parametrize("change", [
+    {"id": None}, {"unit": None}, {"name": ""},
+    {"isParent": "false"}, {"isParent": 0},
+])
+def test_nullable_leaf_still_requires_valid_product(monkeypatch, change):
+    row = product()
+    row.update(isParent=None)
+    row.update(change)
+    mock_pages(monkeypatch, [page([row])])
+    with pytest.raises(s.ExportError):
+        asyncio.run(s.get_price("23109", "66"))
+
+
+def test_missing_parent_marker_rejected(monkeypatch):
+    row = product()
+    del row["isParent"]
+    mock_pages(monkeypatch, [page([row])])
+    with pytest.raises(s.ExportError):
+        asyncio.run(s.get_price("23109", "66"))
+
+
 @pytest.mark.parametrize("bad", [
     {}, {"nomenclatures": []}, page({}, False), page([], True),
     {"nomenclatures": [], "outcome": {"hasMore": "false"}},
