@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import hashlib
 import hmac
 import json
@@ -135,12 +136,23 @@ def decode_image(token):
         raise ExportError("IMAGE_REFERENCE_INVALID", 404) from None
 
 
+async def price_get(path, params):
+    """Retry only HTTP 500 for these read-only endpoints, never publish partial data."""
+    for attempt in range(3):
+        try:
+            return await saby_client._get(path, dict(params))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 500 or attempt == 2:
+                raise
+            await asyncio.sleep(2 ** attempt)
+
+
 async def list_prices(point, actual_date=None):
     point = allowed_point(point)
     actual_date = actual_date or datetime.now(ZoneInfo(get_settings().business_tz)).date()
     found = {}
     for page in range(max(1, get_settings().price_lists_max_pages)):
-        data = await saby_client._get("/retail/nomenclature/price-list", {
+        data = await price_get("/retail/nomenclature/price-list", {
             "pointId": int(point), "actualDate": actual_date.isoformat(),
             "page": page, "pageSize": 25,
         })
@@ -169,7 +181,7 @@ async def get_price(point, price_id):
     seen_positions, products = set(), {}
     folders = 0
     for page in range(max(1, get_settings().price_lists_max_pages)):
-        data = await saby_client._get("/retail/v2/nomenclature/list", dict(params))
+        data = await price_get("/retail/v2/nomenclature/list", params)
         rows, more = page_data(data, "nomenclatures")
         for row in rows:
             cursor = identifier(row.get("hierarchicalId"))

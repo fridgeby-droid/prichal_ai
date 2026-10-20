@@ -62,6 +62,38 @@ def test_over_thousand_cursor(monkeypatch):
     assert asyncio.run(s.get_price("23109", "66"))["product_count"] == 1002
 
 
+def http_error(status):
+    response = httpx.Response(status, request=httpx.Request("GET", "https://api.sbis.ru/test"))
+    return httpx.HTTPStatusError("upstream failure", request=response.request, response=response)
+
+
+def test_http500_retries_identical_page_then_completes(monkeypatch):
+    fetch = mock_pages(monkeypatch, [http_error(500), http_error(500), page([product()])])
+    sleep = AsyncMock()
+    monkeypatch.setattr(s.asyncio, "sleep", sleep)
+    result = asyncio.run(s.get_price("23109", "66"))
+    assert result["complete_snapshot"] and result["product_count"] == 1
+    assert fetch.call_args_list[1] == fetch.call_args_list[2] == fetch.call_args_list[3]
+    assert [call.args[0] for call in sleep.call_args_list] == [1, 2]
+
+
+def test_persistent_http500_never_returns_partial(monkeypatch):
+    fetch = mock_pages(monkeypatch, [page([product()], True)] + [http_error(500)] * 3)
+    monkeypatch.setattr(s.asyncio, "sleep", AsyncMock())
+    result = request("/api/v1/core/price-lists/66?point_id=23109")
+    assert result.status_code == 502 and result.json()["complete_snapshot"] is False
+    assert "products" not in result.json()
+    assert fetch.await_count == 5
+
+
+def test_http400_not_retried(monkeypatch):
+    fetch = AsyncMock(side_effect=http_error(400))
+    monkeypatch.setattr(s.saby_client, "_get", fetch)
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(s.price_get("/retail/v2/nomenclature/list", {}))
+    assert fetch.await_count == 1
+
+
 def test_live_nullable_leaves_and_folder_cursor(monkeypatch):
     leaf = product(2)
     leaf.update(isParent=None, images=None)

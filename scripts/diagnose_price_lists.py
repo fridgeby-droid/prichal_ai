@@ -117,6 +117,17 @@ async def run(point_id, price_id):
                         k: body[k] for k in ("code", "errorCode", "status")
                         if type(body.get(k)) is int
                     }
+                    error = body.get("error")
+                    if isinstance(error, dict):
+                        entry["nested_error"] = {
+                            k: describe(error[k]) for k in
+                            ("code", "errorCode", "message", "details", "data", "type")
+                            if k in error
+                        }
+                        entry["nested_numeric_error_codes"] = {
+                            k: error[k] for k in ("code", "errorCode")
+                            if type(error.get(k)) is int
+                        }
             raise
         entry["response"] = response_shape(data, key)
         return data
