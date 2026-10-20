@@ -147,6 +147,7 @@ async def start(message: Message) -> None:
         "• ShiftEngine DAY/NIGHT;\n"
         "• история смен продавцов.\n\n"
         "Сводка продаж: /daily [дата]\n"
+        "График Core: /coreschedule [дата]\n"
         "Диагностика: /db\n"
         "Ручная синхронизация: /sync 3\n"
         "Магазины (первый этап): /loadstores\n"
@@ -1590,6 +1591,41 @@ async def daily_summary(message: Message) -> None:
     except Exception:
         logger.exception("Daily report failed")
         await message.answer("Не удалось получить сводку. Проверьте подключение к базе и журнал приложения.")
+
+
+@router.message(Command("coreschedule"))
+async def core_schedule_report(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
+    from app.services.core_schedule import read_schedule
+    parts = (message.text or "").split()
+    try:
+        day = date.fromisoformat(parts[1]) if len(parts)==2 else datetime.now(ZoneInfo(settings.business_tz)).date()
+        if len(parts)>2:
+            raise ValueError('Формат: /coreschedule 2026-10-09')
+        data = await read_schedule(day,day)
+        lines = [f"График Core — {day} (считаем действительным)"]
+        if data['last_success']:
+            stamp=data['last_success']['updated_at'].astimezone(ZoneInfo(settings.business_tz))
+            lines.append(f"Последняя успешная загрузка графика: {stamp:%d.%m.%Y %H:%M}")
+        else:
+            lines.append('График ещё не загружен.')
+        for row in data['rows']:
+            warning=' | магазин не привязан к Saby' if row['saby_point_id'] is None else ''
+            lines.append(f"{row['store_name']} | {row['shift_type']} | {row['employee_name']} | {row['position']}{warning}")
+        if not data['rows']:
+            lines.append('Сохранённых назначений за день нет. Проверьте, загружен ли этот период.')
+        text="\n\n".join(lines)
+        for offset in range(0,len(text),3800):
+            await message.answer(text[offset:offset+3800])
+    except ValueError as exc:
+        await message.answer(str(exc))
+    except Exception:
+        logger.exception('Core schedule report failed')
+        await message.answer('Не удалось прочитать график Core. Проверьте настройки и журнал приложения.')
 
 
 @router.message(F.text)

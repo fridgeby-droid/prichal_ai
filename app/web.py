@@ -10,6 +10,8 @@ from fastapi import FastAPI
 from app.bot.router import router
 from app.config import get_settings
 from app.core_api import router as core_api_router
+from app.price_lists_api import router as price_lists_api_router
+from app.services.core_schedule import schedule_loop
 from app.db.database import close_db, health as db_health, init_db
 from app.services.sync import sync_service
 from app.services.storage import storage
@@ -66,14 +68,15 @@ async def lifespan(app: FastAPI):
         )
     )
     sync_task = asyncio.create_task(auto_sync_loop())
+    core_schedule_task = asyncio.create_task(schedule_loop())
 
     try:
         yield
     finally:
-        for task in (polling_task, sync_task):
+        for task in (polling_task, sync_task, core_schedule_task):
             task.cancel()
 
-        for task in (polling_task, sync_task):
+        for task in (polling_task, sync_task, core_schedule_task):
             try:
                 await task
             except asyncio.CancelledError:
@@ -91,6 +94,7 @@ app = FastAPI(
 
 
 app.include_router(core_api_router)
+app.include_router(price_lists_api_router)
 
 @app.get("/")
 async def root():

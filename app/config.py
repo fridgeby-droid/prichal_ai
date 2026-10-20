@@ -56,7 +56,14 @@ class Settings(BaseSettings):
     work_shift_merge_gap_hours: float = 4.0
 
     core_directory_api_key: SecretStr = SecretStr("")
+    core_price_lists_api_key: SecretStr = SecretStr("")
+    # Independent from retail sync: RC may publish supplier assortments.
+    saby_price_list_point_ids: str = ""
+    price_lists_max_pages: int = 2000
+    price_lists_timeout_seconds: int = 240
 
+    core_schedule_sync_enabled: bool = False
+    core_schedule_sync_interval_minutes: int = 30
     core_base_url: str = ""
     core_api_token: str = ""
     core_health_path: str = "/health"

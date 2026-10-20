@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.12"
-BUILD_TAG = "daily-core-directories"
+APP_VERSION = "0.3.14"
+BUILD_TAG = "core-price-lists"

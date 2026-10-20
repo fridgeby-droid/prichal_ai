@@ -18,7 +18,7 @@ def retail_db():
         conn.execute(f"CREATE TABLE {table}(point_id INTEGER, amount NUMERIC)")
         conn.executemany(f"INSERT INTO {table} VALUES (?, ?)", [(23109, 1596), (5583, 100), (5598, 200)])
     ddl = (Path(__file__).parents[1] / "app/db/schema.sql").read_text(encoding="utf-8")
-    scope = ddl[ddl.index("CREATE OR REPLACE VIEW excluded_retail_points"):]
+    scope = ddl[ddl.index("CREATE OR REPLACE VIEW excluded_retail_points"):].split("-- Core schedule is authoritative.")[0]
     conn.executescript(scope.replace("CREATE OR REPLACE VIEW", "CREATE VIEW"))
     return conn, tables
 

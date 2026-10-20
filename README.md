@@ -1,4 +1,12 @@
-# Причал AI v0.3.2 — Timeweb Clean Bootstrap
+# Причал AI v0.3.14 — прайс-листы для Core
+
+Новый защищённый API опубликованного ассортимента Saby и изображений:
+[CORE-PRICE-LISTS-API.md](CORE-PRICE-LISTS-API.md). Отдельный ключ
+`CORE_PRICE_LISTS_API_KEY`, отдельный список `SABY_PRICE_LIST_POINT_IDS`.
+Перед использованием выполните проверку `python -m scripts.price_lists 23109 66 --check-image`
+на сервере с настроенными переменными. Живой прайс в локальных тестах не проверен.
+
+Ниже сохранены инструкции чистого bootstrap и действующие бизнес-правила.
 
 Чистая загрузка на Timeweb без копирования старой БД. Начните с [README_TIMEWEB.md](README_TIMEWEB.md). Ниже — сохранённые правила Payroll Foundation v0.3.0/v0.3.1.
 

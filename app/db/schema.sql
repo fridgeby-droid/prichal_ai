@@ -591,3 +591,23 @@ CREATE OR REPLACE VIEW retail_seller_shifts AS
 CREATE OR REPLACE VIEW retail_shift_plans AS
     SELECT * FROM shift_plans
     WHERE point_id NOT IN (SELECT point_id FROM excluded_retail_points);
+
+-- Core schedule is authoritative. Keep Saby-derived shifts unchanged.
+CREATE TABLE IF NOT EXISTS core_schedule_assignments (
+    source_url TEXT NOT NULL,
+    core_assignment_id TEXT NOT NULL,
+    core_employee_id TEXT NOT NULL,
+    employee_name TEXT NOT NULL,
+    core_store_id TEXT NOT NULL,
+    store_name TEXT NOT NULL,
+    saby_point_id BIGINT,
+    position TEXT NOT NULL,
+    work_date DATE NOT NULL,
+    shift_type TEXT NOT NULL CHECK (shift_type IN ('DAY','NIGHT')),
+    slot INTEGER NOT NULL,
+    cancelled BOOLEAN NOT NULL DEFAULT FALSE,
+    snapshot_at TIMESTAMPTZ NOT NULL,
+    synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(source_url, core_assignment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_core_schedule_date ON core_schedule_assignments(source_url, work_date);
