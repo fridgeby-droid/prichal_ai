@@ -186,6 +186,29 @@ def test_rejects_untrusted_image_urls(locator):
         s.image_descriptor(locator, "23109")
 
 
+@pytest.mark.parametrize("locator", [
+    "img?params=abc", "/retail/img?params=abc",
+    "https://api.sbis.ru/retail/img?params=abc",
+])
+def test_same_image_endpoint_normalized(locator):
+    assert s.image_locator(locator) == "img?params=abc"
+    assert s.image_descriptor(locator, "23109") == s.image_descriptor("img?params=abc", "23109")
+
+
+@pytest.mark.parametrize("locator", [
+    "http://api.sbis.ru/retail/img?params=abc",
+    "https://api.sbis.ru.evil.test/retail/img?params=abc",
+    "https://user@api.sbis.ru/retail/img?params=abc",
+    "//api.sbis.ru/retail/img?params=abc",
+    "https://api.sbis.ru/retail/../img?params=abc",
+    "https://api.sbis.ru/retail/%69mg?params=abc",
+    "https://api.sbis.ru:444/retail/img?params=abc",
+])
+def test_image_canonicalization_does_not_expand_hosts(locator):
+    with pytest.raises(s.ExportError):
+        s.image_locator(locator)
+
+
 def test_image_signature_scope_and_key_rotation(settings):
     desc = s.image_descriptor("img?params=abc", "23109")
     token = desc["download_path"].rsplit("/", 1)[1]

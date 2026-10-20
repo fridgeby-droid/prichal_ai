@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 import httpx
+from urllib.parse import urlsplit
 
 from app.services import price_lists as service
 
@@ -25,8 +26,29 @@ def describe(value):
 def row_shape(row):
     if not isinstance(row, dict):
         return describe(row)
-    return {key: describe(row[key]) if key in row else {"type": "missing"}
-            for key in FIELDS}
+    result = {key: describe(row[key]) if key in row else {"type": "missing"}
+              for key in FIELDS}
+    if isinstance(row.get("images"), list):
+        result["image_reference_shapes"] = [image_shape(v) for v in row["images"][:3]]
+    return result
+
+
+def image_shape(value):
+    result = describe(value)
+    if not isinstance(value, str):
+        return result
+    try:
+        parts = urlsplit(value)
+        result.update(
+            scheme=parts.scheme if parts.scheme in {"https", "http", ""} else "other",
+            host="api.sbis.ru" if parts.netloc == "api.sbis.ru" else "other" if parts.netloc else "none",
+            path=parts.path if parts.path in {"img", "/retail/img", "/img"} else "other",
+            has_query=bool(parts.query), has_fragment=bool(parts.fragment),
+            has_whitespace=any(c.isspace() for c in value),
+        )
+    except ValueError:
+        result["url_parse_failed"] = True
+    return result
 
 
 def response_shape(data, key):

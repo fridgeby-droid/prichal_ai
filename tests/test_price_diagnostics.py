@@ -11,7 +11,7 @@ def test_values_never_printed():
                              "images": ["https://private/?token=SECRET"], "isParent": None}],
             "outcome": {"hasMore": False}, "error": "SECRET", "token": "SECRET"}
     output = json.dumps(d.response_shape(data, "nomenclatures"))
-    assert all(value not in output for value in ("PRIVATE", "SECRET", "123", "https"))
+    assert all(value not in output for value in ("PRIVATE", "SECRET", "123", "https://"))
     assert '"hasMore": false' in output
     assert d.row_shape(data["nomenclatures"][0])["isParent"]["type"] == "NoneType"
 

@@ -81,14 +81,24 @@ def text_field(row, key):
 
 
 def image_locator(value):
-    # Only the documented relative img endpoint, never an arbitrary URL.
+    # Canonicalize representations of the same documented Saby endpoint.
     if not isinstance(value, str) or len(value) > 4096:
         raise ExportError("SABY_IMAGE_REFERENCE_INVALID")
-    parts = urlsplit(value)
-    if (parts.scheme or parts.netloc or parts.fragment or parts.path != "img"
-            or not parts.query or any(ord(c) < 33 for c in value) or "\\" in value):
+    if any(ord(c) < 33 for c in value) or "\\" in value:
         raise ExportError("SABY_IMAGE_REFERENCE_INVALID")
-    return value
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        raise ExportError("SABY_IMAGE_REFERENCE_INVALID") from None
+    absolute = parts.scheme == "https" and parts.netloc == "api.sbis.ru"
+    relative = not parts.scheme and not parts.netloc
+    valid_path = (
+        absolute and parts.path == "/retail/img"
+        or relative and parts.path in {"img", "/retail/img"}
+    )
+    if not valid_path or parts.fragment or not parts.query:
+        raise ExportError("SABY_IMAGE_REFERENCE_INVALID")
+    return "img?" + parts.query
 
 
 def signing_key():
@@ -181,6 +191,8 @@ async def get_price(point, price_id):
                 images = []
             if not isinstance(images, list):
                 raise ExportError()
+            # Validate before deduplication, including non-string references.
+            images = [image_locator(image) for image in images]
             item = {"id": identifier(row.get("id")), "name": text_field(row, "name"),
                     "unit": text_field(row, "unit"),
                     "images": [image_descriptor(image, point) for image in dict.fromkeys(images)]}
