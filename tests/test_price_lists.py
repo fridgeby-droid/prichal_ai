@@ -219,12 +219,23 @@ def test_rejects_untrusted_image_urls(locator):
 
 
 @pytest.mark.parametrize("locator", [
-    "img?params=abc", "/retail/img?params=abc",
+    "img?params=abc", "/img?params=abc", "/retail/img?params=abc",
     "https://api.sbis.ru/retail/img?params=abc",
 ])
 def test_same_image_endpoint_normalized(locator):
     assert s.image_locator(locator) == "img?params=abc"
     assert s.image_descriptor(locator, "23109") == s.image_descriptor("img?params=abc", "23109")
+
+
+def test_live_image_leading_slash_preserves_query(monkeypatch):
+    row = product()
+    row.update(isParent=None, images=["/img?params=a%2Fb%2Bc%3D&size=large"])
+    mock_pages(monkeypatch, [page([row])])
+    result = asyncio.run(s.get_price("23109", "66"))
+    image = result["products"][0]["images"][0]
+    reference = image["download_path"].rsplit("/", 1)[1]
+    assert s.decode_image(reference) == "img?params=a%2Fb%2Bc%3D&size=large"
+    assert result["complete_snapshot"] is True
 
 
 @pytest.mark.parametrize("locator", [
@@ -299,6 +310,7 @@ def test_image_transport_limits(monkeypatch, status, mime, body, ok):
     real_client = httpx.AsyncClient
     def handler(req):
         assert req.url.host == "api.sbis.ru"
+        assert req.url.path == "/retail/img"
         assert req.headers["X-SBISAccessToken"] == "private"
         return httpx.Response(status, headers={"Content-Type": mime}, content=body)
     monkeypatch.setattr(s.httpx, "AsyncClient",

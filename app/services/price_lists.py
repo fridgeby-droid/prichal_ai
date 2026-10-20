@@ -95,7 +95,8 @@ def image_locator(value):
     relative = not parts.scheme and not parts.netloc
     valid_path = (
         absolute and parts.path == "/retail/img"
-        or relative and parts.path in {"img", "/retail/img"}
+        # /img?... is observed in the live point 23109 / price 66 catalog.
+        or relative and parts.path in {"img", "/img", "/retail/img"}
     )
     if not valid_path or parts.fragment or not parts.query:
         raise ExportError("SABY_IMAGE_REFERENCE_INVALID")

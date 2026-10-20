@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.17"
-BUILD_TAG = "core-price-lists-retry-500"
+APP_VERSION = "0.3.18"
+BUILD_TAG = "core-price-lists-slash-images"
