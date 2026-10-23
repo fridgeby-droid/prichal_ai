@@ -4,6 +4,7 @@ import asyncio
 import json
 import httpx
 import re
+import logging
 
 from app.config import get_settings
 from app.services.saby import saby_client
@@ -60,6 +61,8 @@ async def run(apply):
 
 
 def main():
+    logging.basicConfig(level=logging.WARNING, format='%(message)s')
+    logging.getLogger('app.services.catalog_categories').setLevel(logging.INFO)
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--apply',action='store_true',help='Save the complete validated catalog to AI PostgreSQL')
     args=parser.parse_args()

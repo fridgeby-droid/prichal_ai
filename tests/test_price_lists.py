@@ -14,6 +14,10 @@ from app.services import price_lists as s
 @pytest.fixture(autouse=True)
 def settings(monkeypatch):
     s._image_cache.clear()
+    monkeypatch.setattr(s,'_catalog_next_request',0.0)
+    monkeypatch.setattr(s,'_catalog_gate',asyncio.Lock())
+    monkeypatch.setattr(s,'catalog_interval',lambda:0.0)
+    monkeypatch.setattr(s,'monotonic',lambda:0.0)
     config = SimpleNamespace(core_price_lists_api_key=SecretStr("p"*40),
                              saby_price_list_point_ids="23109",
                              price_lists_max_pages=2000, business_tz="Asia/Yekaterinburg",

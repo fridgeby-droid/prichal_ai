@@ -6,7 +6,9 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import re
+from time import monotonic
 from collections import OrderedDict
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
@@ -20,6 +22,36 @@ from app.services.saby import API_BASE, saby_client
 
 # Per-process, bounded, always revalidated; not a source of stale success.
 _image_cache = OrderedDict()
+_catalog_gate = asyncio.Lock()
+_catalog_next_request = 0.0
+logger = logging.getLogger(__name__)
+
+
+def catalog_interval():
+    return max(1.0, min(60.0, get_settings().catalog_min_request_interval_seconds))
+
+
+def rate_limit_delay(response):
+    """Recognize Saby's observed HTTP 500 antibot warning; never log the payload."""
+    if response.status_code == 429:
+        try:
+            return max(120.0, float(response.headers.get('Retry-After', '120')))
+        except ValueError:
+            return 120.0
+    if response.status_code != 500:
+        return None
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    error = body.get('error') if isinstance(body, dict) else None
+    details = error.get('details') if isinstance(error, dict) else None
+    if not isinstance(details, str) or 'метод вызывается слишком часто' not in details.lower():
+        return None
+    match = re.search(r'на\s+(\d+)\s+секунд', details, re.IGNORECASE)
+    if not match:
+        match = re.search(r'Время блокировки:\s*(\d+)', details, re.IGNORECASE)
+    return max(120.0, float(match.group(1))) if match else 120.0
 
 
 class ExportError(Exception):
@@ -138,14 +170,26 @@ def decode_image(token):
 
 
 async def price_get(path, params):
-    """Retry only HTTP 500 for these read-only endpoints, never publish partial data."""
+    """Pace all catalog/price reads in this process and honor upstream cooldowns."""
+    global _catalog_next_request
     for attempt in range(3):
-        try:
-            return await saby_client._get(path, dict(params))
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code != 500 or attempt == 2:
-                raise
-            await asyncio.sleep(2 ** attempt)
+        async with _catalog_gate:
+            remaining = _catalog_next_request - monotonic()
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            _catalog_next_request = monotonic() + catalog_interval()
+            try:
+                return await saby_client._get(path, dict(params))
+            except httpx.HTTPStatusError as exc:
+                cooldown = rate_limit_delay(exc.response)
+                if cooldown is not None:
+                    # Keep this gate even after the last attempt so other readers wait.
+                    _catalog_next_request = max(_catalog_next_request, monotonic()+cooldown+1)
+                    logger.warning('Saby catalog rate limit: wait at least %.0f seconds; attempt %s/3', cooldown+1, attempt+1)
+                elif exc.response.status_code == 500:
+                    _catalog_next_request = max(_catalog_next_request, monotonic()+2**attempt)
+                if (exc.response.status_code != 500 and cooldown is None) or attempt == 2:
+                    raise
 
 
 async def list_prices(point, actual_date=None):

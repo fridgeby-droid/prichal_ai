@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     saby_price_list_point_ids: str = ""
     price_lists_max_pages: int = 2000
     price_lists_timeout_seconds: int = 240
+    catalog_min_request_interval_seconds: float = 3.0
+    catalog_sync_timeout_seconds: int = 7200
 
     core_schedule_sync_enabled: bool = False
     core_schedule_sync_interval_minutes: int = 30

@@ -1,6 +1,7 @@
 """Current Saby catalog folders, never inferred categories or historical assignments."""
 import asyncio
 import json
+import logging
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from uuid import UUID
@@ -11,6 +12,7 @@ from app.services.price_lists import ExportError, identifier, page_data, price_g
 from app.services.period_reports import PRODUCTS_SQL, period, point_filter, delta
 
 META_KEY = 'analytics:catalog_categories:v1'
+logger = logging.getLogger(__name__)
 
 
 def canonical_uuid(value):
@@ -90,6 +92,8 @@ async def fetch_catalog():
                 raise ExportError('CATALOG_DUPLICATE_CURSOR')
             seen.add(cursor)
         rows.extend(batch)
+        if (page+1) % 10 == 0:
+            logger.info('Catalog loading: %s pages, %s records received; snapshot not yet saved', page+1, len(rows))
         if not more:
             return {**build_catalog(rows),'schema_version':1,'complete_snapshot':True,
                     'started_at':started,'fetched_at':datetime.now(timezone.utc).isoformat(),
@@ -99,7 +103,7 @@ async def fetch_catalog():
 
 
 async def sync_catalog(apply=False):
-    async with asyncio.timeout(600):
+    async with asyncio.timeout(max(60, min(14400, get_settings().catalog_sync_timeout_seconds))):
         data = await fetch_catalog()
     saved = False
     if apply:
