@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from uuid import UUID
+from decimal import Decimal, ROUND_HALF_UP
 
 from app.config import get_settings
 from app.db.database import pool
@@ -184,15 +185,18 @@ async def report(start,end,point_id='',previous_start='',previous_end='',level='
             'change':delta(x['revenue'] if x else 0,y['revenue'] if y else 0) if before and current and previous else None})
     rows.sort(key=lambda r:(-abs(r['change']['absolute']) if r['change'] is not None else -(r['current'] or r['previous'])['revenue'],r['category_id']))
     def total(groups):
-        return {'revenue':sum(g['revenue'] for g in groups.values()),
+        revenue=sum(g['revenue'] for g in groups.values())
+        unmapped=groups.get('UNMAPPED',{}).get('revenue',0)
+        return {'revenue':revenue,
+                'category_mapped_revenue':revenue-unmapped,
                 'returns':sum(g['returns'] for g in groups.values()),
-                'unmapped_revenue':groups.get('UNMAPPED',{}).get('revenue',0),
+                'unmapped_revenue':unmapped,
                 'unmapped_product_groups':groups.get('UNMAPPED',{}).get('product_groups',0)}
     limit=max(1,min(int(limit),50))
     settings=get_settings()
     now=datetime.now(ZoneInfo(settings.business_tz))
     current_day=(now-timedelta(hours=settings.business_day_start_hour)).date()
-    return {'date_from':start,'date_to':end,'point_id':point_id or None,
+    result={'date_from':start,'date_to':end,'point_id':point_id or None,
         'previous_from':previous_start or None,'previous_to':previous_end or None,
         'level':level,'catalog_status':'AVAILABLE' if catalog else 'NOT_LOADED',
         'catalog_fetched_at':catalog['fetched_at'] if catalog else None,
@@ -206,4 +210,56 @@ async def report(start,end,point_id='',previous_start='',previous_end='',level='
         'quality':{'completeness':'UNCONFIRMED','reconciliation':'NOT_CHECKED',
                    'period_closed':last<current_day,
                    'previous_period_closed':before[1]<current_day if before else None},
-        'note':'Категории — разделы текущего каталога Saby, не прайса. Оба периода пересчитаны по одному снимку. Нет записей не означает ноль. Без сопоставления включено в итог; суммы позиций не равны платёжной выручке. Для проверки вызовите get_load_reconcile_status.'}
+        'field_definitions':{
+            'unmapped_revenue':'Только сумма товарных строк, для которых не найдена связь с категорией каталога. Входит в revenue. Это НЕ несверенная с платежами сумма.',
+            'category_mapped_revenue':'Сумма строк с найденной связью, включая товары вне разделов каталога.',
+            'revenue':'Итого по всем товарным строкам, включая unmapped_revenue.',
+        },
+        'note':'Категории — разделы текущего каталога Saby, не прайса. Оба периода пересчитаны по одному снимку. Нет записей не означает ноль. Без категории включено в итог. Сопоставление с платежами — отдельный вопрос. Для проверки вызовите get_load_reconcile_status.'}
+    result['current_report_text']=format_current_report(result)
+    return result
+
+
+def format_current_report(data):
+    """Render the current-period numbers without asking an LLM to add or regroup them."""
+    def cents(value):
+        return Decimal(str(value)).quantize(Decimal('0.01'),rounding=ROUND_HALF_UP)
+    def money(value):
+        return f'{cents(value):,.2f}'.replace(',',' ').replace('.',',')
+    totals=data['current_totals']
+    lines=[f"Продажи по категориям: {data['date_from']} → {data['date_to']}",
+           'Суммы товарных строк, не платёжная выручка.']
+    raw_shown=Decimal(0)
+    rounded_shown=Decimal(0)
+    for row in data['categories']:
+        if row['current'] is None:
+            continue
+        value=Decimal(str(row['current']['revenue']))
+        raw_shown+=value
+        rounded_shown+=cents(value)
+        name=' '.join(row['name'].split())[:180]
+        lines.append(f'{name}: {money(value)} ₽')
+    if data['truncated']:
+        other=Decimal(str(totals['revenue']))-raw_shown
+        rounded_shown+=cents(other)
+        lines.append(f'Остальные категории вне списка: {money(other)} ₽')
+    elif raw_shown != Decimal(str(totals['revenue'])):
+        raise ValueError('Итог не совпадает с суммой категорий; отчёт не опубликован.')
+    if Decimal(str(totals['category_mapped_revenue']))+Decimal(str(totals['unmapped_revenue'])) != Decimal(str(totals['revenue'])):
+        raise ValueError('Нарушен баланс сопоставления категорий; отчёт не опубликован.')
+    adjustment=cents(totals['revenue'])-rounded_shown
+    if adjustment:
+        lines.append(f'Поправка округления: {money(adjustment)} ₽')
+    lines.extend([
+        f"ИТОГО: {money(totals['revenue'])} ₽",
+        f"Из итога с найденной связью с каталогом: {money(totals['category_mapped_revenue'])} ₽",
+        f"Из итога без найденной категории: {money(totals['unmapped_revenue'])} ₽",
+        f"Товарных групп без категории: {totals['unmapped_product_groups']}",
+        f"Возвраты отдельно: {money(totals['returns'])} ₽",
+        f"Каталог: {data['catalog_status']}; снимок {data['catalog_fetched_at'] or 'отсутствует'}.",
+        'Использована текущая классификация каталога, не историческая.',
+        'Сверка этим отчётом не выполнялась. Полнота загрузки продаж не подтверждена.',
+    ])
+    if not data['quality']['period_closed']:
+        lines.append('Период ещё не завершён.')
+    return '\n'.join(lines)

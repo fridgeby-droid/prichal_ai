@@ -1575,6 +1575,33 @@ async def payroll_month(message: Message) -> None:
         await message.answer(f"⚠️ Payroll month error:\n{exc}")
 
 
+@router.message(Command("categories"))
+async def category_summary(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    from app.services.catalog_categories import report
+    parts=(message.text or '').split()
+    if len(parts) not in (3,4):
+        await message.answer('Формат: /categories YYYY-MM-DD YYYY-MM-DD [point_id]')
+        return
+    try:
+        data=await report(parts[1],parts[2],parts[3] if len(parts)==4 else '',limit=50)
+        text=data['current_report_text']
+        chunks=['']
+        for line in text.splitlines():
+            if len(chunks[-1])+len(line)+1>3800:
+                chunks.append('')
+            chunks[-1]+=line+'\n'
+        for chunk in chunks:
+            await message.answer(chunk,parse_mode=None)
+    except ValueError as exc:
+        await message.answer(str(exc),parse_mode=None)
+    except Exception:
+        logger.exception('Category report failed')
+        await message.answer('Не удалось получить категории. Проверьте журнал приложения.')
+
+
 @router.message(Command("daily"))
 async def daily_summary(message: Message) -> None:
     if not _allowed(message):

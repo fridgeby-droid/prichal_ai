@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.21"
-BUILD_TAG = "catalog-rate-limit-cooldown"
+APP_VERSION = "0.3.22"
+BUILD_TAG = "deterministic-category-report"
