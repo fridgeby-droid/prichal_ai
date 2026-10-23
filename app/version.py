@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.18"
-BUILD_TAG = "core-price-lists-slash-images"
+APP_VERSION = "0.3.20"
+BUILD_TAG = "executive-category-tools"

@@ -7,6 +7,8 @@ from app.services.analytics import analytics_service
 from app.services.core import core_client
 from app.services.payroll import payroll_service
 from app.services.saby import saby_client
+from app.services import period_reports
+from app.services import catalog_categories
 
 
 def _dump(data: dict | list) -> str:
@@ -25,9 +27,98 @@ async def get_database_status() -> str:
 
 
 @tool
-async def list_stores() -> str:
-    """Получить список магазинов Причала из Saby с pointId и адресами."""
-    return _dump(await saby_client.list_points())
+async def list_stores(query: str = "") -> str:
+    """Найти магазин в локальном справочнике: название/адрес/точный ID. РЦ исключён.
+
+    Args:
+        query: Поисковая строка; пусто — все магазины. При нескольких совпадениях уточни выбор.
+    """
+    return _dump(await period_reports.stores(query))
+
+
+@tool
+async def get_period_summary(date_from: str, date_to: str, point_id: str = "") -> str:
+    """Выручка, платёжные чеки, средний чек и отдельные возвраты за 1–92 бизнес-дня.
+
+    Args:
+        date_from: Начало YYYY-MM-DD, включительно.
+        date_to: Конец YYYY-MM-DD, включительно.
+        point_id: Точный ID из list_stores; пусто — сеть.
+    """
+    return _dump(await period_reports.summary(date_from,date_to,point_id))
+
+
+@tool
+async def compare_sales_periods(date_from: str, date_to: str, previous_from: str,
+                                previous_to: str, point_id: str = "") -> str:
+    """Сравнить два периода по сети и магазинам: абсолютные и процентные изменения.
+
+    Args:
+        date_from: Начало текущего периода YYYY-MM-DD.
+        date_to: Конец текущего периода YYYY-MM-DD.
+        previous_from: Начало базы сравнения YYYY-MM-DD.
+        previous_to: Конец базы сравнения YYYY-MM-DD.
+        point_id: Точный ID магазина; пусто — сеть.
+    """
+    return _dump(await period_reports.compare(date_from,date_to,previous_from,previous_to,point_id))
+
+
+@tool
+async def get_day_night_breakdown(date_from: str, date_to: str, point_id: str = "") -> str:
+    """Разбить продажи периода на DAY/NIGHT по времени платежа; не по графику работников.
+
+    Args:
+        date_from: Начало YYYY-MM-DD.
+        date_to: Конец YYYY-MM-DD.
+        point_id: Точный ID магазина; пусто — сеть.
+    """
+    return _dump(await period_reports.shifts(date_from,date_to,point_id))
+
+
+@tool
+async def get_product_sales(date_from: str, date_to: str, point_id: str = "",
+                            previous_from: str = "", previous_to: str = "", limit: int = 20) -> str:
+    """Продажи товаров или крупнейшие изменения товарных сумм. Для категорий есть get_category_sales.
+
+    Args:
+        date_from: Начало YYYY-MM-DD.
+        date_to: Конец YYYY-MM-DD.
+        point_id: Точный ID магазина; пусто — сеть.
+        previous_from: Необязательное начало базы сравнения YYYY-MM-DD.
+        previous_to: Необязательный конец базы сравнения YYYY-MM-DD; задаётся вместе с началом.
+        limit: Количество строк, от 1 до 50.
+    """
+    return _dump(await period_reports.products(date_from,date_to,point_id,previous_from,previous_to,limit))
+
+
+@tool
+async def get_category_sales(date_from: str, date_to: str, point_id: str = "",
+                             previous_from: str = "", previous_to: str = "",
+                             level: str = "top", limit: int = 30) -> str:
+    """Продажи по текущим разделам каталога Saby и их вклад в изменения. Не историческая классификация.
+
+    Args:
+        date_from: Начало YYYY-MM-DD.
+        date_to: Конец YYYY-MM-DD.
+        point_id: Точный ID магазина; пусто — сеть.
+        previous_from: Начало базы сравнения; пусто — без сравнения.
+        previous_to: Конец базы сравнения; задаётся вместе с предыдущим началом.
+        level: top — верхний раздел, leaf — непосредственный раздел товара.
+        limit: От 1 до 50 категорий.
+    """
+    return _dump(await catalog_categories.report(date_from,date_to,point_id,previous_from,previous_to,level,limit))
+
+
+@tool
+async def get_load_reconcile_status(date_from: str, date_to: str, point_id: str = "") -> str:
+    """Проверить свежесть загрузки, отсутствие записей и сверку; блок не более 7 дней.
+
+    Args:
+        date_from: Начало YYYY-MM-DD.
+        date_to: Конец YYYY-MM-DD.
+        point_id: Точный ID магазина; пусто — сеть.
+    """
+    return _dump(await period_reports.status(date_from,date_to,point_id))
 
 
 @tool

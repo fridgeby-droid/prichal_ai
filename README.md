@@ -1,4 +1,10 @@
-# Причал AI v0.3.18 — прайс-листы для Core
+# Причал AI v0.3.20 — категории каталога
+
+Загрузка категорий и отчёт по текущим разделам Saby: [CATEGORY-ANALYTICS.md](CATEGORY-ANALYTICS.md).
+
+
+Сводки, сравнения, DAY/NIGHT, товарные изменения и статус сверки: [ANALYTICS-TOOLS.md](ANALYTICS-TOOLS.md).
+
 
 Новый защищённый API опубликованного ассортимента Saby и изображений:
 [CORE-PRICE-LISTS-API.md](CORE-PRICE-LISTS-API.md). Отдельный ключ
