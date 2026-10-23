@@ -23,7 +23,7 @@ async def get_detail_report(kind: str, date_from: str = '', date_to: str = '', p
     """Детальная аналитика локальных продаж без запросов Saby.
 
     Args:
-        kind: averages (СЧ сети/точек/учёток), quantities (товары по продавцам), basket (наполняемость продажи), trend (дни/недели), clients (давность клиентов по Customer ID, НЕ карты).
+        kind: averages (СЧ сети/точек/учёток), quantities (товары по продавцам), modifiers (только явный IsModifier=true), basket (наполняемость продажи), trend (дни/недели), clients (давность клиентов по Customer ID, НЕ карты).
         date_from: YYYY-MM-DD; обе даты пустые — вся локальная история. Для clients нижняя граница не ограничивает историю последней покупки.
         date_to: YYYY-MM-DD; для clients дата отсечения.
         point_id: Точный ID магазина или пусто для сети.

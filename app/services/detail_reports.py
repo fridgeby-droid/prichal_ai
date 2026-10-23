@@ -102,9 +102,9 @@ def recency(rows, as_of, minimum=0, maximum=None):
 
 
 async def report(kind,start='',end='',point_id='',seller_id='',shift='',query='',min_days=0,max_days=None,offset=0):
-    if kind not in ('averages','quantities','basket','trend','clients'): raise ValueError('Неизвестный отчёт.')
+    if kind not in ('averages','quantities','modifiers','basket','trend','clients'): raise ValueError('Неизвестный отчёт.')
     if kind=='clients' and (seller_id or shift or query): raise ValueError('Давность клиентов: фильтры продавца, смены и товара не поддерживаются.')
-    if query and kind!='quantities': raise ValueError('Поиск товара доступен в quantities.')
+    if query and kind not in ('quantities','modifiers'): raise ValueError('Поиск товара доступен в quantities/modifiers.')
     point=await p.point_filter(point_id)
     seller=number(seller_id)
     shift=shift.upper() if shift else None
@@ -124,7 +124,8 @@ async def report(kind,start='',end='',point_id='',seller_id='',shift='',query=''
             payment_rows=[dict(r) for r in await conn.fetch(PAYMENTS,*args)] if kind in ('averages','trend') else []
             sale_rows=[dict(r) for r in await conn.fetch(SALES,*args)] if kind=='averages' else []
             sync_rows=await conn.fetch('SELECT status,started_at,finished_at FROM sync_runs ORDER BY id DESC LIMIT 1')
-            item_rows=[dict(r) for r in await conn.fetch(ITEMS,*args,query or None)] if kind in ('quantities','basket') else []
+            item_sql=ITEMS if kind!='modifiers' else ITEMS.replace('GROUP BY s.point_id', "AND i.raw_json->'IsModifier'='true'::jsonb GROUP BY s.point_id")
+            item_rows=[dict(r) for r in await conn.fetch(item_sql,*args,query or None)] if kind in ('quantities','modifiers','basket') else []
             basket_rows=[dict(r) for r in await conn.fetch(BASKETS,*args)] if kind=='basket' else []
             client_rows=[dict(r) for r in await conn.fetch(CLIENTS,last,point)] if kind=='clients' else []
     result={'kind':kind,'date_from':first.isoformat(),'date_to':last.isoformat(),'point_id':str(point) if point else None,
@@ -161,7 +162,7 @@ async def report(kind,start='',end='',point_id='',seller_id='',shift='',query=''
             lines.append('Отдельно: средняя сумма продажи Saby = TotalPrice / число продаж (point_id + sale_id). Не платёжная выручка, не подтверждённый фискальный чек.')
             for label,values in result['sale_averages'].items():
                 for row in values: lines.append(f"{label} ID {row['id']}: продаж {row['checks']}; средняя сумма {money(row['average'])} ₽")
-    elif kind=='quantities':
+    elif kind in ('quantities','modifiers'):
         item_rows.sort(key=lambda r:(-dec(r['revenue']),str(r['point_id']),str(r['seller_id']),r['product_key'],r['unit']))
         result['total_groups']=len(item_rows)
         result['rows']=item_rows[offset:offset+50]
@@ -172,6 +173,8 @@ async def report(kind,start='',end='',point_id='',seller_id='',shift='',query=''
             row['average_unit_price']=dec(row['revenue'])/dec(row['quantity']) if dec(row['quantity']) else None
             lines.append(f"{row['name']} [{row['product_key']}; {row['unit']}], {names.get(str(row['point_id']),row['point_id'])}, {row['seller_name']} [ID {row['seller_id']}]: количество {row['quantity']}; возврат количества {row['return_quantity']}; сумма {money(row['revenue'])} ₽; средняя цена {money(row['average_unit_price'])}; покупок с товаром {row['purchases']}")
         lines.append(f"Групп {len(item_rows)}; следующая страница offset={result['next_offset']}. Количества разных единиц не суммируются. Средняя цена = сумма / количество, не прайс.")
+        if kind=='modifiers':
+            lines.append('Только строки с явным JSON-признаком IsModifier=true. Пустой результат не доказывает отсутствие модификаторов: поле может отсутствовать. Количество берётся из строки продажи; повторно на количество основного товара не умножается. Связь с родительской строкой ещё не подтверждена.')
     elif kind=='basket':
         n=len(basket_rows)
         result['purchases']=n

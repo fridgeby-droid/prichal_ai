@@ -1596,7 +1596,7 @@ async def category_summary(message: Message) -> None:
         await message.answer('Не удалось получить категории. Проверьте журнал приложения.')
 
 
-@router.message(Command("avgcheck", "itemqty", "basket", "trend", "clients"))
+@router.message(Command("avgcheck", "itemqty", "modifiers", "basket", "trend", "clients"))
 async def detail_summary(message: Message) -> None:
     if not _allowed(message):
         await _reject(message)
@@ -1618,7 +1618,7 @@ async def detail_summary(message: Message) -> None:
             key,sep,value=part.partition('=')
             if not sep or key not in aliases or aliases[key] in options: raise ValueError('Фильтры: point=ID seller=ID shift=DAY query="название" min=30 max=59 offset=0')
             options[aliases[key]]=int(value) if key in ('min','max','offset') else value
-        kind={'avgcheck':'averages','itemqty':'quantities','basket':'basket','trend':'trend','clients':'clients'}[command]
+        kind={'avgcheck':'averages','itemqty':'quantities','modifiers':'modifiers','basket':'basket','trend':'trend','clients':'clients'}[command]
         data=await report(kind,start,end,**options)
         for chunk in chunks(data['report_text']): await message.answer(chunk,parse_mode=None)
     except ValueError as exc:

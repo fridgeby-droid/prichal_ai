@@ -15,7 +15,7 @@ async def run(args):
 
 def main():
     p=argparse.ArgumentParser()
-    p.add_argument('kind',choices=['averages','quantities','basket','trend','clients'])
+    p.add_argument('kind',choices=['averages','quantities','modifiers','basket','trend','clients'])
     p.add_argument('--start',default='')
     p.add_argument('--end',default='')
     p.add_argument('--point-id',default='')
