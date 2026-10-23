@@ -9,6 +9,7 @@ from app.services.payroll import payroll_service
 from app.services.saby import saby_client
 from app.services import period_reports
 from app.services import catalog_categories
+from app.services import management_reports
 
 
 def _dump(data: dict | list) -> str:
@@ -45,7 +46,7 @@ async def get_period_summary(date_from: str, date_to: str, point_id: str = "") -
         date_to: Конец YYYY-MM-DD, включительно.
         point_id: Точный ID из list_stores; пусто — сеть.
     """
-    return _dump(await period_reports.summary(date_from,date_to,point_id))
+    return _dump(await management_reports.report(date_from,date_to,point_id=point_id,kind='summary'))
 
 
 @tool
@@ -60,7 +61,7 @@ async def compare_sales_periods(date_from: str, date_to: str, previous_from: str
         previous_to: Конец базы сравнения YYYY-MM-DD.
         point_id: Точный ID магазина; пусто — сеть.
     """
-    return _dump(await period_reports.compare(date_from,date_to,previous_from,previous_to,point_id))
+    return _dump(await management_reports.report(date_from,date_to,previous_from,previous_to,point_id,kind='comparison'))
 
 
 @tool
@@ -72,7 +73,7 @@ async def get_day_night_breakdown(date_from: str, date_to: str, point_id: str = 
         date_to: Конец YYYY-MM-DD.
         point_id: Точный ID магазина; пусто — сеть.
     """
-    return _dump(await period_reports.shifts(date_from,date_to,point_id))
+    return _dump(await management_reports.report(date_from,date_to,point_id=point_id,kind='daynight'))
 
 
 @tool
@@ -88,7 +89,7 @@ async def get_product_sales(date_from: str, date_to: str, point_id: str = "",
         previous_to: Необязательный конец базы сравнения YYYY-MM-DD; задаётся вместе с началом.
         limit: Количество строк, от 1 до 50.
     """
-    return _dump(await period_reports.products(date_from,date_to,point_id,previous_from,previous_to,limit))
+    return _dump(await management_reports.report(date_from,date_to,previous_from,previous_to,point_id,kind='products',limit=limit))
 
 
 @tool
@@ -106,7 +107,7 @@ async def get_category_sales(date_from: str, date_to: str, point_id: str = "",
         level: top — верхний раздел, leaf — непосредственный раздел товара.
         limit: От 1 до 50 категорий.
     """
-    return _dump(await catalog_categories.report(date_from,date_to,point_id,previous_from,previous_to,level,limit))
+    return _dump(await management_reports.report(date_from,date_to,previous_from,previous_to,point_id,kind='categories',level=level,limit=limit))
 
 
 @tool
@@ -118,7 +119,23 @@ async def get_load_reconcile_status(date_from: str, date_to: str, point_id: str 
         date_to: Конец YYYY-MM-DD.
         point_id: Точный ID магазина; пусто — сеть.
     """
-    return _dump(await period_reports.status(date_from,date_to,point_id))
+    return _dump(await management_reports.run_quality(date_from,date_to,point_id))
+
+
+@tool
+async def get_sales_drivers(date_from: str, date_to: str, previous_from: str,
+                            previous_to: str, point_id: str = "", limit: int = 10) -> str:
+    """Единый отчёт о вкладе магазинов, DAY/NIGHT, категорий и товаров в изменения двух периодов.
+
+    Args:
+        date_from: Начало текущего периода YYYY-MM-DD.
+        date_to: Конец текущего периода YYYY-MM-DD.
+        previous_from: Начало базы сравнения YYYY-MM-DD.
+        previous_to: Конец базы сравнения YYYY-MM-DD.
+        point_id: Точный ID магазина; пусто — сеть без РЦ.
+        limit: Число крупнейших вкладов в каждом разрезе, от 1 до 50.
+    """
+    return _dump(await management_reports.report(date_from,date_to,previous_from,previous_to,point_id,kind='drivers',limit=limit))
 
 
 @tool
