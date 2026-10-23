@@ -17,6 +17,28 @@ def _dump(data: dict | list) -> str:
 
 
 @tool
+async def get_detail_report(kind: str, date_from: str = '', date_to: str = '', point_id: str = '',
+                            seller_id: str = '', shift: str = '', query: str = '',
+                            min_days: int = 0, max_days: int = -1, offset: int = 0) -> str:
+    """Детальная аналитика локальных продаж без запросов Saby.
+
+    Args:
+        kind: averages (СЧ сети/точек/учёток), quantities (товары по продавцам), basket (наполняемость продажи), trend (дни/недели), clients (давность клиентов по Customer ID, НЕ карты).
+        date_from: YYYY-MM-DD; обе даты пустые — вся локальная история. Для clients нижняя граница не ограничивает историю последней покупки.
+        date_to: YYYY-MM-DD; для clients дата отсечения.
+        point_id: Точный ID магазина или пусто для сети.
+        seller_id: Точный ID учётки Saby или пусто; реальный сотрудник не подтверждён.
+        shift: DAY/NIGHT или пусто. Для clients запрещён.
+        query: Подстрока названия или ID товара для quantities; совпадения не объединяются.
+        min_days: Минимальная давность покупки включительно для clients.
+        max_days: Максимальная давность включительно; -1 без верхней границы.
+        offset: Смещение страницы клиентов/товаров, по 50 групп.
+    """
+    from app.services.detail_reports import report
+    return _dump(await report(kind,date_from,date_to,point_id,seller_id,shift,query,min_days,None if max_days==-1 else max_days,offset))
+
+
+@tool
 async def get_database_status() -> str:
     """Проверить PostgreSQL Timeweb и показать покрытие исторических данных."""
     return _dump(

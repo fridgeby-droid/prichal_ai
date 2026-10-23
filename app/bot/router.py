@@ -1596,7 +1596,39 @@ async def category_summary(message: Message) -> None:
         await message.answer('Не удалось получить категории. Проверьте журнал приложения.')
 
 
-@router.message(Command("sales", "compare", "drivers", "daynight", "products", "reportquality"))
+@router.message(Command("avgcheck", "itemqty", "basket", "trend", "clients"))
+async def detail_summary(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    import shlex
+    from app.services.detail_reports import report
+    from app.services.management_reports import chunks
+    try:
+        parts=shlex.split(message.text or '')
+        command=parts.pop(0).split('@')[0].lstrip('/')
+        start=end=''
+        if parts and '=' not in parts[0]:
+            if len(parts)<2: raise ValueError('Укажите две даты YYYY-MM-DD или не указывайте даты для всей локальной истории.')
+            start,end=parts[:2]
+            parts=parts[2:]
+        options={}
+        aliases={'point':'point_id','seller':'seller_id','shift':'shift','query':'query','min':'min_days','max':'max_days','offset':'offset'}
+        for part in parts:
+            key,sep,value=part.partition('=')
+            if not sep or key not in aliases or aliases[key] in options: raise ValueError('Фильтры: point=ID seller=ID shift=DAY query="название" min=30 max=59 offset=0')
+            options[aliases[key]]=int(value) if key in ('min','max','offset') else value
+        kind={'avgcheck':'averages','itemqty':'quantities','basket':'basket','trend':'trend','clients':'clients'}[command]
+        data=await report(kind,start,end,**options)
+        for chunk in chunks(data['report_text']): await message.answer(chunk,parse_mode=None)
+    except ValueError as exc:
+        await message.answer(str(exc),parse_mode=None)
+    except Exception:
+        logger.exception('Detail report failed')
+        await message.answer('Не удалось получить отчёт. Проверьте журнал приложения.')
+
+
+@router.message(Command("sales", "compare", "drivers", "daynight", "products", "reportquality", "comparable"))
 async def management_summary(message: Message) -> None:
     if not _allowed(message):
         await _reject(message)
@@ -1604,7 +1636,7 @@ async def management_summary(message: Message) -> None:
     from app.services.management_reports import report, run_quality, chunks
     parts=(message.text or '').split()
     command=parts[0].split('@')[0].lstrip('/')
-    comparing=command in {'compare','drivers'}
+    comparing=command in {'compare','drivers','comparable'}
     count=5 if comparing else 3
     if len(parts) not in (count,count+1):
         dates='ТЕКУЩЕЕ_НАЧАЛО ТЕКУЩИЙ_КОНЕЦ БАЗА_НАЧАЛО БАЗА_КОНЕЦ' if comparing else 'YYYY-MM-DD YYYY-MM-DD'
@@ -1616,7 +1648,7 @@ async def management_summary(message: Message) -> None:
             await message.answer('Проверяю локальную сверку. Допустимый блок — до 7 дней.')
             data=await run_quality(parts[1],parts[2],point)
         else:
-            kind={'sales':'summary','compare':'comparison','drivers':'drivers','daynight':'daynight','products':'products'}[command]
+            kind={'sales':'summary','compare':'comparison','drivers':'drivers','daynight':'daynight','products':'products','comparable':'comparable'}[command]
             data=await report(parts[1],parts[2],parts[3] if comparing else '',parts[4] if comparing else '',point,kind)
         for chunk in chunks(data['report_text']):
             await message.answer(chunk,parse_mode=None)

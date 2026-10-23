@@ -8,8 +8,9 @@ from app.db.database import pool
 from app.services import period_reports as periods
 from app.services import catalog_categories as catalog_service
 from app.version import APP_VERSION
+from app.services.store_calendar import cohort
 
-KINDS = {'summary','comparison','drivers','daynight','products','categories'}
+KINDS = {'summary','comparison','drivers','daynight','products','categories','comparable'}
 LATEST_SQL = '''SELECT id,status,started_at,finished_at,date_from,date_to
  FROM sync_runs ORDER BY id DESC LIMIT 1'''
 ACTIVE_SQL = "SELECT EXISTS(SELECT 1 FROM sync_runs WHERE status='RUNNING')"
@@ -83,6 +84,9 @@ def dimension(a,b,cd,pd,has_previous,limit=10):
         item.update(id=key,name=(x or y)['name'],observed_current=x is not None,observed_previous=y is not None,
                     quantity_current=x.get('quantity') if x else None,quantity_previous=y.get('quantity') if y else None,
                     unit=(x or y).get('unit'))
+        for side,source in [('current',x),('previous',y)]:
+            quantity=source.get('quantity') if source else None
+            item['average_unit_price_'+side]=dec(source['revenue'])/dec(quantity) if quantity is not None and dec(quantity) else None
         # A missing group can contribute to the observed total but is not proof of zero sales.
         item['observation_warning']=has_previous and (x is None or y is None)
         item['change_percent']=item['change']['percent'] if item['change'] and x and y else None
@@ -118,7 +122,7 @@ async def report(start,end,previous_start='',previous_end='',point_id='',kind='s
     first,last=periods.period(start,end)
     if bool(previous_start)!=bool(previous_end): raise ValueError('Нужны обе даты сравнения.')
     before=periods.period(previous_start,previous_end) if previous_start else None
-    if kind in ('comparison','drivers') and before is None: raise ValueError('Для сравнения нужны два периода.')
+    if kind in ('comparison','drivers','comparable') and before is None: raise ValueError('Для сравнения нужны два периода.')
     point=await periods.point_filter(point_id)
     limit=max(1,min(int(limit),50))
     needs_items=kind in ('drivers','products','categories')
@@ -133,6 +137,13 @@ async def report(start,end,previous_start='',previous_end='',point_id='',kind='s
             current_items=[dict(r) for r in await conn.fetch(periods.PRODUCTS_SQL,first,last,point)] if needs_items else []
             previous_items=[dict(r) for r in await conn.fetch(periods.PRODUCTS_SQL,*before,point)] if needs_items and before else []
             catalog=await catalog_service.read_catalog(conn) if kind in ('categories','drivers') else None
+            comparable_items=None
+            if needs_items and before:
+                included,_=cohort(stores,current,previous,first,last,*before)
+                ids=[int(r['point_id']) for r in included]
+                sql=periods.PRODUCTS_SQL.replace('GROUP BY product_key,i.unit_name','AND i.point_id=ANY($4::BIGINT[]) GROUP BY product_key,i.unit_name')
+                comparable_items=([dict(r) for r in await conn.fetch(sql,first,last,point,ids)],
+                                  [dict(r) for r in await conn.fetch(sql,*before,point,ids)])
             all_days=set(days(first,last)) | (set(days(*before)) if before else set())
             saved=await conn.fetch('SELECT key,value FROM app_meta WHERE key=ANY($1::TEXT[])',
                                    [check_key(scope,d) for d in sorted(all_days)])
@@ -184,6 +195,28 @@ async def report(start,end,previous_start='',previous_end='',point_id='',kind='s
             'items':{'current_returns':sum(dec(r['returns']) for r in current_items),
                      'previous_returns':sum(dec(r['returns']) for r in previous_items)} if needs_items else None,
             'quality_current':quality[0],'quality_previous':quality[1] if before else None}
+    if before:
+        included, excluded = cohort(stores,current,previous,first,last,*before)
+        ids={r['point_id'] for r in included}
+        ca=[r for r in current if str(r['point_id']) in ids]
+        cb=[r for r in previous if str(r['point_id']) in ids]
+        ma,mb=measures(ca),measures(cb)
+        result['comparable']={
+            'included':included,'excluded':excluded,
+            'metrics':{k:comparison(ma[k],mb[k],cd,pd,bool(ids)) for k in ('revenue','checks','returns')},
+            'average':{'current':ma['average'],'previous':mb['average'],
+                       'change':periods.delta(ma['average'],mb['average']) if ma['average'] is not None and mb['average'] is not None else None},
+            'stores':dimension(payment_groups(ca,'point_id',names),payment_groups(cb,'point_id',names),cd,pd,True,50),
+            'daynight':dimension(payment_groups(ca,'shift_type',{}),payment_groups(cb,'shift_type',{}),cd,pd,True,50),
+            'excluded_revenue':comparison(a['revenue']-ma['revenue'],b['revenue']-mb['revenue'],cd,pd,bool(a['has_records'] and b['has_records']))}
+        if comparable_items is not None:
+            ia,ib=comparable_items
+            result['comparable']['products']=dimension(product_groups(ia),product_groups(ib),cd,pd,True,10)
+            if catalog is not None:
+                result['comparable']['categories']=dimension(catalog_service.aggregate(ia,catalog,level),catalog_service.aggregate(ib,catalog,level),cd,pd,True,50)
+        result['brief']={'network_per_day':metrics['revenue']['per_day_change'],
+                         'comparable_per_day':result['comparable']['metrics']['revenue']['per_day_change'],
+                         'top_observed_changes':dimensions.get('stores',{}).get('rows',[])[:3]}
     result['report_text']=format_report(result)
     return result
 
@@ -254,8 +287,12 @@ def format_quality(q):
     else: lines.append('Успешная загрузка пересекающегося периода не найдена.')
     for row in q.get('store_dates_without_records',[]):
         lines.append(f"Без записей, point_id {row['point_id']}: {date_ranges(row['dates'])}")
+    for row in q.get('expected_before_opening',[]):
+        lines.append(f"До открытия {row['opening_date']}, point_id {row['point_id']}: {date_ranges(row['dates'])} — отсутствие ожидаемо.")
+    for row in q.get('records_before_opening',[]):
+        lines.append(f"ПРОВЕРИТЬ: записи до открытия, point_id {row['point_id']}: {date_ranges(row['dates'])}. Данные сохранены в итогах.")
     if q.get('fallback_records'): lines.append(f"Платёжных записей fallback: {q['fallback_records']}")
-    if q.get('sync_in_progress'): lines.append('Сейчас выполняется sync: дождитесь завершения.')
+    if q.get('sync_in_progress'): lines.append('В БД есть незавершённый sync (RUNNING). Работа процесса не подтверждена: проверьте журнал загрузки. Сверка пока не считается актуальной.')
     lines.append('Нет записей ≠ нулевые продажи. OK сверки не подтверждает полноту источника.')
     return '\n'.join(lines)
 
@@ -273,6 +310,11 @@ def format_report(data):
     if prev:
         lines.append(f"База: {data['previous_from']} → {data['previous_to']} ({data['previous_days']} дней)")
         if not data['equal_duration']: lines.append('Длительность различается. Сравнивайте также среднее за календарный бизнес-день.')
+    if data.get('brief'):
+        lines.extend(['Кратко, по доступным данным:',
+                      'Вся сеть, выручка в день: '+change_text(data['brief']['network_per_day']),
+                      'Сопоставимая сеть, выручка в день: '+change_text(data['brief']['comparable_per_day']),
+                      'Полнота источника не подтверждена; это наблюдаемые изменения, не доказанные причины.'])
     for key,label in [('revenue','Платёжная выручка'),('checks','Чеки (платёжные записи)'),('average','Средний чек'),('returns','Возвраты отдельно'),('return_checks','Возвратные записи')]:
         item=data['metrics'][key]
         current=money(item['current']) if data['has_current_records'] else 'нет записей'
@@ -302,6 +344,9 @@ def format_report(data):
                 if not data['equal_duration']:
                     line+='; в день '+money(row['previous_per_day'])+' → '+money(row['current_per_day'])
             lines.append(line)
+            if key=='products' and row.get('quantity_current') is not None:
+                lines.append('Количество: '+(str(row.get('quantity_previous'))+' → ' if prev else '')+str(row['quantity_current'])+
+                             '; средняя цена за единицу: '+(money(row.get('average_unit_price_previous'))+' → ' if prev else '')+money(row.get('average_unit_price_current')))
         # Explicit decimal rounding residual, never a made-up remainder.
         for side,label in [('current','текущий')]+([('previous','база')] if prev else []):
             shown=sum((dec(r[side]).quantize(Decimal('.01'),rounding=ROUND_HALF_UP) for _,r in entries),Decimal(0))
@@ -314,6 +359,8 @@ def format_report(data):
         if prev:
             lines.append('Изменение раздела: '+change_text(block['totals']['change']))
             lines.append('Среднее за день: '+money(block['totals']['previous_per_day'])+' → '+money(block['totals']['current_per_day'])+'; Δ '+change_text(block['totals']['per_day_change']))
+    if data.get('comparable'):
+        lines.extend(format_comparable(data['comparable']))
     cat=data['catalog']
     if data.get('items'):
         lines.append('Возвраты по товарным строкам отдельно: '+(money(data['items']['previous_returns'])+' → ' if prev else '')+money(data['items']['current_returns']))
@@ -324,6 +371,51 @@ def format_report(data):
     if prev: lines.extend(['\nКАЧЕСТВО БАЗЫ СРАВНЕНИЯ',format_quality(data['quality_previous'])])
     lines.append('Вклад — изменение доступных записей, не доказанная причина. Разрезы не складываются между собой. Суммы товаров/категорий не равны платёжной выручке. Среднее за день не исправляет пропуски и сезонность.')
     return '\n'.join(lines)
+
+
+def format_comparable(block):
+    lines=['\nСОПОСТАВИМАЯ СЕТЬ — платёжный слой',
+           'Отбор: нет известного открытия внутри периодов; есть записи каждого дня обоих периодов. Полнота источника и история закрытий не подтверждены.',
+           'Включено магазинов: '+str(len(block['included']))]
+    reasons={'OPENED_AFTER_PERIOD_START':'открыт после начала одного из периодов',
+             'CURRENT_DATES_WITHOUT_RECORDS':'есть дни без записей текущего периода',
+             'PREVIOUS_DATES_WITHOUT_RECORDS':'есть дни без записей базового периода'}
+    for row in block['excluded']:
+        lines.append('Исключён: '+row['name']+' (ID '+row['point_id']+'): '+
+                     '; '.join(reasons[r] for r in row['reasons'])+
+                     ('; открыт '+row['opening_date'] if row['opening_date'] else ''))
+    if not block['included']:
+        lines.append('Нет магазинов для сопоставимого сравнения; изменение не рассчитывается.')
+        return lines
+    for key,label in [('revenue','Выручка'),('checks','Платёжные записи'),('returns','Возвраты отдельно')]:
+        row=block['metrics'][key]
+        lines.append(label+': '+money(row['previous'])+' → '+money(row['current'])+'; Δ '+change_text(row['change']))
+        lines.append('В день: '+money(row['previous_per_day'])+' → '+money(row['current_per_day'])+'; Δ '+change_text(row['per_day_change']))
+    row=block['average']
+    lines.append('Средний чек: '+money(row['previous'])+' → '+money(row['current'])+'; Δ '+change_text(row['change']))
+    for key,label in [('stores','Магазины сопоставимой сети'),('daynight','DAY/NIGHT сопоставимой сети')]:
+        lines.append(label)
+        for row in block[key]['rows']:
+            lines.append(' '.join(row['name'].split())[:160]+': '+money(row['previous'])+' → '+money(row['current'])+
+                         '; Δ '+change_text(row['change'])+'; в день Δ '+change_text(row['per_day_change']))
+    row=block['excluded_revenue']
+    lines.append('Остальная сеть (новые/исключённые из сравнения магазины): '+money(row['previous'])+' → '+money(row['current'])+'; Δ '+change_text(row['change']))
+    lines.append('Выручка всей сети = сопоставимые + остальные магазины. Остальная сеть не означает только эффект открытий.')
+    for key in ('products','categories'):
+        if key not in block: continue
+        section=block[key]
+        lines.append(('Товары' if key=='products' else 'Категории')+' сопоставимой сети — суммы товарных строк')
+        for row in section['rows']:
+            lines.append(' '.join(row['name'].split())[:160]+' ['+str(row.get('unit') or '')+']: '+money(row['previous'])+' → '+money(row['current'])+'; Δ '+change_text(row['change']))
+            if key=='products': lines.append('Количество: '+str(row['quantity_previous'])+' → '+str(row['quantity_current'])+'; средняя цена: '+money(row['average_unit_price_previous'])+' → '+money(row['average_unit_price_current']))
+        if section['omitted_groups']:
+            lines.append('Остальные: '+money(section['other']['previous'])+' → '+money(section['other']['current']))
+        shown=section['rows']+([section['other']] if section['omitted_groups'] else [])
+        for side in ('previous','current'):
+            rounding=dec(section['totals'][side]).quantize(Decimal('.01'),rounding=ROUND_HALF_UP)-sum((dec(r[side]).quantize(Decimal('.01'),rounding=ROUND_HALF_UP) for r in shown),Decimal(0))
+            if rounding: lines.append('Поправка округления '+side+': '+money(rounding))
+        lines.append('Итого товарного раздела: '+money(section['totals']['previous'])+' → '+money(section['totals']['current']))
+    return lines
 
 
 def chunks(text):

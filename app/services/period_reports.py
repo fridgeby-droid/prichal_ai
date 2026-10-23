@@ -7,6 +7,7 @@ from app.config import get_settings
 from app.db.database import pool
 from app.services.analytics import analytics_service
 from app.services.daily_report import totals
+from app.services.store_calendar import opening_quality
 
 PAYMENTS_SQL = """
 SELECT p.point_id, p.business_date, p.business_shift_type AS shift_type,
@@ -76,10 +77,6 @@ async def point_filter(point_id):
 
 
 def quality(rows, store_rows, start, end, latest, success):
-    observed = {(r['point_id'], r['business_date']) for r in rows}
-    days = [start+timedelta(days=i) for i in range((end-start).days+1)]
-    missing = [{'point_id': str(s['point_id']), 'dates': [d.isoformat() for d in days
-                 if (s['point_id'],d) not in observed]} for s in store_rows]
     settings = get_settings()
     current = (datetime.now(ZoneInfo(settings.business_tz)) - timedelta(hours=settings.business_day_start_hour)).date()
     stamp = success.get('finished_at') if success else None
@@ -88,7 +85,7 @@ def quality(rows, store_rows, start, end, latest, success):
             'last_success_age_hours': round(age,2) if age is not None else None,
             'reconciliation': 'NOT_CHECKED', 'last_run': latest,
             'last_success_overlapping_period': success,
-            'store_dates_without_records': [m for m in missing if m['dates']],
+            **opening_quality(rows, store_rows, start, end),
             'fallback_records': sum(r['fallback'] for r in rows),
             'note': 'Отсутствие записей не означает нулевые продажи. Успешный sync не доказывает полноту всех точек. Для сверки вызовите get_load_reconcile_status.'}
 
