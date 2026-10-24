@@ -1,4 +1,7 @@
-# Причал AI v0.3.28 — вложенные модификаторы продаж
+# Причал AI v0.3.29 — компактная диагностика сумм и скидок
+
+Для контрольных продаж начисления/списания добавлен режим --money.
+Инструкция: [LOYALTY-DIAGNOSTICS.md](LOYALTY-DIAGNOSTICS.md).
 
 Исправлен пропуск SaleNomenclatures[].Positions в диагностике и /modifiers.
 История повторно не загружается. Ограничения и проверка: [NESTED-MODIFIERS.md](NESTED-MODIFIERS.md).

@@ -7,6 +7,30 @@ from datetime import date
 from app.config import get_settings
 from app.db.database import init_db,close_db,pool
 from app.services.sale_tree import nodes
+from app.services.sale_tree import numeric
+
+
+def financial_details(raw):
+    """Selected monetary fields only; never export arbitrary raw objects."""
+    def amount(value):
+        parsed=numeric(value)
+        return str(parsed) if parsed is not None else None
+    def label(value):
+        if not isinstance(value,str): return None
+        text=re.sub(r'https?://\S+|\S+@\S+','[REDACTED]',value)
+        text=re.sub(r'\d[\d\s()+-]{5,}\d','[REDACTED]',text)
+        text=re.sub(r'[A-Za-z0-9_+/=-]{32,}','[REDACTED]',text)
+        return text[:160]
+    payments=raw.get('Payments')
+    discounts=raw.get('DiscountInfo')
+    return {'sale':{k:amount(raw.get(k)) for k in ('TotalPrice','TotalDiscount')},
+            'payments':[{'index':i,**{k:amount(p.get(k)) for k in ('Amount','CashSum','BankSum','CertificateSum','SalarySum','PayCash','PayBank')}}
+                        for i,p in enumerate(payments) if isinstance(p,dict)] if isinstance(payments,list) else None,
+            'discounts':[{'index':i,'name':label(d.get('Name')),'value':amount(d.get('Value')),
+                          'percent_value':amount(d.get('PercentValue'))}
+                         for i,d in enumerate(discounts) if isinstance(d,dict)] if isinstance(discounts,list) else None,
+            'loyalty_status':'UNCONFIRMED',
+            'note':'DiscountInfo — скидки. Это не автоматически списание бонусов. Суммы PayBank и BankSum не складывать между собой. null означает неизвестно.'}
 
 
 def structure(value, path='$', output=None, depth=0):
@@ -53,7 +77,7 @@ def details(row):
             'products':products,'fields':structure(raw)}
 
 
-async def run(sale_id=None,point_id=None,number=None,calendar_date=None):
+async def run(sale_id=None,point_id=None,number=None,calendar_date=None,money=False):
     if (sale_id is None)==(number is None): raise ValueError('Выберите внутренний ID или --number.')
     day=date.fromisoformat(calendar_date) if calendar_date else None
     if number is not None and day is None: raise ValueError('Для номера продажи нужна --date YYYY-MM-DD.')
@@ -72,6 +96,9 @@ async def run(sale_id=None,point_id=None,number=None,calendar_date=None):
                     'candidates':[overview(r) for r in rows[:20]],'truncated':len(rows)>20,
                     'next':'При неоднозначности укажите --point-id. При NOT_FOUND проверьте дату, номер и загрузку; это не доказывает отсутствие продажи в Saby.'}
         row=rows[0]
+        if money:
+            raw=json.loads(row['raw_json']) if isinstance(row['raw_json'],str) else row['raw_json']
+            return {'status':'SELECTED_LOCAL_FINANCIAL_FIELDS',**overview(row),'financial':financial_details(raw)}
         return {'status':'SELECTED_LOCAL_SALE',**details(row),
                 'note':'Сверьте магазин, номер, дату и товары с чеком. Контакты, карты и имя клиента скрыты. Отсутствие бонусных полей не означает нулевые бонусы.'}
     finally:
@@ -84,9 +111,10 @@ def main():
     parser.add_argument('--point-id',type=int)
     parser.add_argument('--number',type=int)
     parser.add_argument('--date',dest='calendar_date')
+    parser.add_argument('--money',action='store_true',help='Краткие суммы продажи, оплаты и DiscountInfo без структуры и контактов')
     args=parser.parse_args()
     try:
-        result=asyncio.run(run(args.sale_id,args.point_id,args.number,args.calendar_date))
+        result=asyncio.run(run(args.sale_id,args.point_id,args.number,args.calendar_date,args.money))
     except ValueError as exc:
         print(json.dumps({'error':'INVALID_ARGUMENT','message':str(exc)},ensure_ascii=False))
         raise SystemExit(1)
