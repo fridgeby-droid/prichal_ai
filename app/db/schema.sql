@@ -611,3 +611,16 @@ CREATE TABLE IF NOT EXISTS core_schedule_assignments (
     PRIMARY KEY(source_url, core_assignment_id)
 );
 CREATE INDEX IF NOT EXISTS idx_core_schedule_date ON core_schedule_assignments(source_url, work_date);
+
+-- Read observations of order bonus state, not a complete card transaction ledger.
+CREATE TABLE IF NOT EXISTS bonus_observations (
+    point_id BIGINT NOT NULL,
+    sale_id BIGINT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('OK','ERROR','UNSUPPORTED')),
+    response JSONB,
+    attempted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    error_code TEXT,
+    PRIMARY KEY(point_id,sale_id),
+    FOREIGN KEY(point_id,sale_id) REFERENCES sales(point_id,sale_id)
+);

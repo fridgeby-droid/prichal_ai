@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.30"
-BUILD_TAG = "documented-bonus-read-probe"
+APP_VERSION = "0.3.31"
+BUILD_TAG = "resumable-bonus-observations"
