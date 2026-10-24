@@ -57,9 +57,10 @@ def test_number_without_date_does_not_query_database(monkeypatch):
 def test_modifier_report_filters_json_boolean_and_preserves_quantity(monkeypatch):
     class C(Conn):
         async def fetch(self,sql,*args):
-            if "i.raw_json->'IsModifier'='true'::jsonb" in sql:
-                rows=await super().fetch(d.ITEMS,*args)
-                return rows[:1]
+            if sql==d.MODIFIER_SALES:
+                return [dict(point_id=1,sale_id=1,seller_id=7,seller_name='S',raw_json={'SaleNomenclatures':[
+                    {'SaleNomenclature':1,'Nomenclature':42,'Name':'тара','Quantity':6,'TotalPrice':30,'IsModifier':True},
+                    {'SaleNomenclature':2,'Nomenclature':42,'Name':'тара','Quantity':-1,'IsReturn':True,'IsModifier':True}]})]
             return await super().fetch(sql,*args)
     monkeypatch.setattr(d,'pool',lambda:Pool(C()))
     result=asyncio.run(d.report('modifiers','2026-09-01','2026-09-01',query='тара'))

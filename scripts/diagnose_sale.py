@@ -6,6 +6,7 @@ import re
 from datetime import date
 from app.config import get_settings
 from app.db.database import init_db,close_db,pool
+from app.services.sale_tree import nodes
 
 
 def structure(value, path='$', output=None, depth=0):
@@ -38,15 +39,15 @@ def overview(row):
 
 def details(row):
     raw=json.loads(row['raw_json']) if isinstance(row['raw_json'],str) else row['raw_json']
-    positions=raw.get('SaleNomenclatures')
     products=[]
-    for item in positions if isinstance(positions,list) else []:
-        if not isinstance(item,dict): continue
-        products.append({'line_id':str(item['SaleNomenclature']) if item.get('SaleNomenclature') is not None else None,
+    for node in nodes(raw):
+        item=node['item']
+        products.append({'line_key':node['line_key'],'parent_key':node['parent_key'],'path':node['path'],
+                         'line_id':str(item['SaleNomenclature']) if item.get('SaleNomenclature') is not None else None,
                          'product_id':str(item['Nomenclature']) if item.get('Nomenclature') is not None else None,
                          'name':item.get('Name'),'unit':item.get('UnitName'),
                          'quantity':item.get('Quantity'),'is_modifier':item.get('IsModifier') if type(item.get('IsModifier')) is bool else None,
-                         'is_return':item.get('IsReturn'),'refused':item.get('Refused')})
+                         'is_return':node['is_return'],'refused':node['refused']})
     return {**overview(row),'customer_present':raw.get('Customer') is not None,
             'discount_info_count':len(raw['DiscountInfo']) if isinstance(raw.get('DiscountInfo'),list) else None,
             'products':products,'fields':structure(raw)}

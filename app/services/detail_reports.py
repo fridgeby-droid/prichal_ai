@@ -8,6 +8,7 @@ from app.config import get_settings
 from app.db.database import pool
 from app.services import period_reports as p
 from app.services.management_reports import dec, money
+from app.services.sale_tree import modifiers
 
 
 PAYMENTS = '''SELECT p.point_id,p.seller_id,MAX(p.seller_name) seller_name,
@@ -68,6 +69,11 @@ SALES = '''SELECT point_id,seller_id,MAX(seller_name) seller_name,
  AND ($5::TEXT IS NULL OR business_shift_type=$5)
  GROUP BY point_id,seller_id'''
 
+MODIFIER_SALES = '''SELECT point_id,sale_id,seller_id,seller_name,raw_json
+ FROM retail_sales WHERE NOT deleted AND business_date BETWEEN $1 AND $2
+ AND ($3::BIGINT IS NULL OR point_id=$3) AND ($4::BIGINT IS NULL OR seller_id=$4)
+ AND ($5::TEXT IS NULL OR business_shift_type=$5)'''
+
 
 def number(value):
     if not value: return None
@@ -124,8 +130,9 @@ async def report(kind,start='',end='',point_id='',seller_id='',shift='',query=''
             payment_rows=[dict(r) for r in await conn.fetch(PAYMENTS,*args)] if kind in ('averages','trend') else []
             sale_rows=[dict(r) for r in await conn.fetch(SALES,*args)] if kind=='averages' else []
             sync_rows=await conn.fetch('SELECT status,started_at,finished_at FROM sync_runs ORDER BY id DESC LIMIT 1')
-            item_sql=ITEMS if kind!='modifiers' else ITEMS.replace('GROUP BY s.point_id', "AND i.raw_json->'IsModifier'='true'::jsonb GROUP BY s.point_id")
-            item_rows=[dict(r) for r in await conn.fetch(item_sql,*args,query or None)] if kind in ('quantities','modifiers','basket') else []
+            item_rows=[dict(r) for r in await conn.fetch(ITEMS,*args,query or None)] if kind in ('quantities','basket') else []
+            if kind=='modifiers':
+                item_rows=modifiers(await conn.fetch(MODIFIER_SALES,*args),query)
             basket_rows=[dict(r) for r in await conn.fetch(BASKETS,*args)] if kind=='basket' else []
             client_rows=[dict(r) for r in await conn.fetch(CLIENTS,last,point)] if kind=='clients' else []
     result={'kind':kind,'date_from':first.isoformat(),'date_to':last.isoformat(),'point_id':str(point) if point else None,
@@ -170,11 +177,11 @@ async def report(kind,start='',end='',point_id='',seller_id='',shift='',query=''
         for row in result['rows']:
             row['point_id']=str(row['point_id'])
             row['seller_id']=str(row['seller_id']) if row['seller_id'] is not None else None
-            row['average_unit_price']=dec(row['revenue'])/dec(row['quantity']) if dec(row['quantity']) else None
+            row['average_unit_price']=dec(row['revenue'])/dec(row['quantity']) if row['revenue'] is not None and dec(row['quantity']) else None
             lines.append(f"{row['name']} [{row['product_key']}; {row['unit']}], {names.get(str(row['point_id']),row['point_id'])}, {row['seller_name']} [ID {row['seller_id']}]: количество {row['quantity']}; возврат количества {row['return_quantity']}; сумма {money(row['revenue'])} ₽; средняя цена {money(row['average_unit_price'])}; покупок с товаром {row['purchases']}")
         lines.append(f"Групп {len(item_rows)}; следующая страница offset={result['next_offset']}. Количества разных единиц не суммируются. Средняя цена = сумма / количество, не прайс.")
         if kind=='modifiers':
-            lines.append('Только строки с явным JSON-признаком IsModifier=true. Пустой результат не доказывает отсутствие модификаторов: поле может отсутствовать. Количество берётся из строки продажи; повторно на количество основного товара не умножается. Связь с родительской строкой ещё не подтверждена.')
+            lines.append('Обход SaleNomenclatures и вложенных Positions из сохранённых продаж; только явный IsModifier=true. Повторы одного ID/Key внутри продажи считаются один раз; конфликт останавливает отчёт. Количество не умножается на основную позицию. Неизвестная сумма — н/д, не ноль; суммы модификаторов нельзя прибавлять к выручке родительских товаров. Пустой результат не доказывает отсутствие модификаторов.')
     elif kind=='basket':
         n=len(basket_rows)
         result['purchases']=n
