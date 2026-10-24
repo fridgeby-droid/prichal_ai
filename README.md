@@ -1,4 +1,8 @@
-# Причал AI v0.3.29 — компактная диагностика сумм и скидок
+# Причал AI v0.3.30 — проверка источника бонусов
+
+Одна команда проверяет документированный bonus-read на двух контрольных продажах:
+`python -m scripts.probe_bonuses`.
+Инструкция и ограничения: [BONUS-SOURCE-PROBE.md](BONUS-SOURCE-PROBE.md).
 
 Для контрольных продаж начисления/списания добавлен режим --money.
 Инструкция: [LOYALTY-DIAGNOSTICS.md](LOYALTY-DIAGNOSTICS.md).
