@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.26"
-BUILD_TAG = "modifier-facts-sale-number-diagnostics"
+APP_VERSION = "0.3.27"
+BUILD_TAG = "order-read-retry-cooldown"

@@ -28,7 +28,8 @@ def test_dns_failure_recovers_without_empty_result(monkeypatch):
     monkeypatch.setattr(client, "_authenticate", AsyncMock(return_value="test"))
     data = asyncio.run(client._get("/retail/order/list", {}))
     assert data["orders"][0]["Sale"] == 123
-    assert [c.args[0] for c in sleep.await_args_list] == [1, 2]
+    waits=[c.args[0] for c in sleep.await_args_list]
+    assert len(waits)==2 and waits[0]>=2 and waits[1]>=3
 
 
 def test_permanent_dns_failure_is_bounded(monkeypatch):

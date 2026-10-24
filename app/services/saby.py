@@ -13,6 +13,7 @@ import httpx
 
 from app.services.async_utils import gather_or_cancel
 from app.config import get_settings
+from app.services.order_transport import OrderTransport
 
 
 AUTH_URL = "https://online.sbis.ru/oauth/service/"
@@ -91,10 +92,17 @@ class SabyClient:
         self.settings = get_settings()
         self._token = TokenCache()
         self._lock = asyncio.Lock()
+        self._order_transport = OrderTransport()
         # Shared across every recursively split window, not only store/day jobs.
         self._requests = asyncio.Semaphore(max(1, min(self.settings.sync_concurrency, 4)))
 
     async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        if method.upper()=='GET' and url==f'{API_BASE}/retail/order/list':
+            async def send():
+                async with self._requests:
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(60,connect=20)) as client:
+                        return await client.request(method,url,**kwargs)
+            return await self._order_transport.request(send,kwargs.get('params',{}))
         for attempt in range(4):
             delay = float(2 ** attempt)
             try:
