@@ -66,6 +66,30 @@ def test_over_thousand_cursor(monkeypatch):
     assert asyncio.run(s.get_price("23109", "66"))["product_count"] == 1002
 
 
+@pytest.mark.parametrize('cursor',[1683,2084])
+def test_terminal_empty_object_preserves_products(monkeypatch,cursor):
+    fetch=mock_pages(monkeypatch,[page([product(cursor)],True),page({})])
+    result=asyncio.run(s.get_price('23109','66'))
+    assert result['complete_snapshot'] is True and result['product_count']==1
+    assert result['products'][0]['id']==str(cursor)
+    assert fetch.call_args_list[2].args[1]['position']==cursor
+
+
+@pytest.mark.parametrize('data',[
+    page({},True), {'nomenclatures':{}},
+    {'nomenclatures':{},'outcome':{'hasMore':0}},
+    {'nomenclatures':{},'outcome':{'hasMore':'false'}},
+    page({'unexpected':1}),page(None),{'outcome':{'hasMore':False}},
+    {**page({}),'error':{'code':1}}, {**page({}),'success':False},
+])
+def test_invalid_terminal_shapes_still_rejected(data):
+    with pytest.raises(s.ExportError): s.page_data(data,'nomenclatures')
+
+
+def test_empty_object_exception_not_applied_to_price_list_directory():
+    with pytest.raises(s.ExportError): s.page_data(page({},key='priceLists'),'priceLists')
+
+
 def http_error(status):
     response = httpx.Response(status, request=httpx.Request("GET", "https://api.sbis.ru/test"))
     return httpx.HTTPStatusError("upstream failure", request=response.request, response=response)
@@ -138,7 +162,7 @@ def test_missing_parent_marker_rejected(monkeypatch):
 
 
 @pytest.mark.parametrize("bad", [
-    {}, {"nomenclatures": []}, page({}, False), page([], True),
+    {}, {"nomenclatures": []}, page({"unexpected": 1}, False), page([], True),
     {"nomenclatures": [], "outcome": {"hasMore": "false"}},
     {**page([]), "error": "failed"}, page([{"id": 1}]),
 ])
@@ -344,3 +368,4 @@ def test_upstream_validator_avoids_second_download(monkeypatch):
     token = s.image_descriptor("img?params=abc", "23109")["download_path"].rsplit("/", 1)[1]
     first = asyncio.run(s.download_image(token))
     assert asyncio.run(s.download_image(token)) == first
+

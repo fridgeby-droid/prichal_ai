@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.33"
-BUILD_TAG = "saby-maintenance-and-customer-bonuses"
+APP_VERSION = "0.3.34"
+BUILD_TAG = "price-list-terminal-empty-object"

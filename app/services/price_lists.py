@@ -99,6 +99,10 @@ def page_data(data, key):
     rows, outcome = data.get(key), data.get("outcome")
     # The official executable examples use outcome.hasMore (both endpoints).
     more = outcome.get("hasMore") if isinstance(outcome, dict) else None
+    # Observed in price lists 81/82: final page after a valid cursor is {}.
+    # Only this exact empty-object representation with explicit false is valid.
+    if key == "nomenclatures" and type(rows) is dict and not rows and more is False:
+        rows = []
     if not isinstance(rows, list) or type(more) is not bool:
         raise ExportError()
     if any(not isinstance(r, dict) for r in rows) or (more and not rows):
