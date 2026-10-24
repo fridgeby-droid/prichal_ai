@@ -4,12 +4,13 @@ import json
 import logging
 from datetime import date
 from app.db.database import init_db,close_db
-from app.services.bonus_load import load,report
+from app.services.bonus_load import load,report,plan
 
 
 async def run(args):
     await init_db()
     try:
+        if args.action=='plan': return await plan(args.start,args.end,args.point_id)
         if args.action=='report': return await report(args.start,args.end,args.point_id)
         return await load(args.start,args.end,args.point_id,0 if args.all else args.limit,args.refresh)
     finally: await close_db()
@@ -17,7 +18,7 @@ async def run(args):
 
 def main():
     parser=argparse.ArgumentParser(description='Бонусы сохранённых продаж, без изменения Saby')
-    parser.add_argument('action',choices=('load','report'))
+    parser.add_argument('action',choices=('load','report','plan'))
     parser.add_argument('--start',type=date.fromisoformat)
     parser.add_argument('--end',type=date.fromisoformat)
     parser.add_argument('--point-id',type=int)

@@ -60,7 +60,7 @@ async def load(start=None, end=None, point=None, limit=100, refresh=False):
                     AND ($1::date IS NULL OR s.business_date >= $1)
                     AND ($2::date IS NULL OR s.business_date <= $2)
                     AND ($3::bigint IS NULL OR s.point_id=$3)
-                    AND (b.point_id IS NULL OR b.fingerprint<>md5(s.raw_json::text)
+                    AND (b.point_id IS NULL
                       OR b.status='ERROR' OR ($4 AND b.attempted_at<$5))
                     ORDER BY s.business_date,s.point_id,s.sale_id LIMIT 1''',
                     start,end,point,refresh,started)
@@ -108,6 +108,46 @@ async def load(start=None, end=None, point=None, limit=100, refresh=False):
             return {**counts,'status':'LOCAL_SALES_PROCESSED','complete_history':False}
         finally:
             await conn.execute('SELECT pg_advisory_unlock($1)', LOCK)
+
+
+async def plan(start=None, end=None, point=None):
+    """Local inventory only. No calls to Saby, no guessed absence of loyalty."""
+    async with pool().acquire() as conn:
+        rows = await conn.fetch('''SELECT s.raw_json,s.customer_id,b.status,
+            (b.fingerprint=md5(s.raw_json::text)) fresh
+            FROM retail_sales s LEFT JOIN bonus_observations b USING(point_id,sale_id)
+            WHERE NOT s.deleted
+            AND ($1::date IS NULL OR s.business_date >= $1)
+            AND ($2::date IS NULL OR s.business_date <= $2)
+            AND ($3::bigint IS NULL OR s.point_id=$3)''',start,end,point)
+    return inventory(rows)
+
+
+def inventory(rows):
+    counts = dict(local_sales=0,saved_ok=0,unsupported_saved=0,
+                  changed_saved=0,new_sales=0,retry_errors=0,
+                  pending_requests=0,pending_without_uuid=0,
+                  pending_with_customer=0)
+    for row in rows:
+        counts['local_sales'] += 1
+        status = row['status']
+        if status in ('OK','UNSUPPORTED'):
+            counts['saved_ok' if status=='OK' else 'unsupported_saved'] += 1
+            if not row['fresh']: counts['changed_saved'] += 1
+            continue
+        counts['retry_errors' if status=='ERROR' else 'new_sales'] += 1
+        raw=row['raw_json']
+        if isinstance(raw,str): raw=json.loads(raw)
+        if not isinstance(raw,dict) or candidate_key(raw) is None:
+            counts['pending_without_uuid'] += 1
+        else:
+            counts['pending_requests'] += 1
+            if row['customer_id'] is not None: counts['pending_with_customer'] += 1
+    return {**counts,'minimum_wait_hours':round(counts['pending_requests']*3/3600,2),
+            'saby_requests_made':0,
+            'note':'Оценка для обычного load, без --refresh. Время — только паузы, без ответов и повторов. '
+                   'Сохранённые ответы повторно не читаются; изменённые продажи остаются '
+                   'неподтверждёнными до явного --refresh. Отсутствие Customer не доказывает отсутствие карты.'}
 
 
 async def report(start, end, point=None):
