@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.32"
-BUILD_TAG = "bonus-cache-and-local-plan"
+APP_VERSION = "0.3.33"
+BUILD_TAG = "saby-maintenance-and-customer-bonuses"

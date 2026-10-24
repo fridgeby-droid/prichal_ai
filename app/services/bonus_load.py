@@ -56,7 +56,7 @@ async def load(start=None, end=None, point=None, limit=100, refresh=False):
                 rows = await conn.fetch('''SELECT s.point_id,s.sale_id,s.raw_json,
                     md5(s.raw_json::text) fingerprint FROM retail_sales s
                     LEFT JOIN bonus_observations b USING(point_id,sale_id)
-                    WHERE NOT s.deleted
+                    WHERE NOT s.deleted AND s.customer_id IS NOT NULL
                     AND ($1::date IS NULL OR s.business_date >= $1)
                     AND ($2::date IS NULL OR s.business_date <= $2)
                     AND ($3::bigint IS NULL OR s.point_id=$3)
@@ -127,9 +127,12 @@ def inventory(rows):
     counts = dict(local_sales=0,saved_ok=0,unsupported_saved=0,
                   changed_saved=0,new_sales=0,retry_errors=0,
                   pending_requests=0,pending_without_uuid=0,
-                  pending_with_customer=0)
+                  pending_with_customer=0,excluded_without_customer=0)
     for row in rows:
         counts['local_sales'] += 1
+        if row['customer_id'] is None:
+            counts['excluded_without_customer'] += 1
+            continue
         status = row['status']
         if status in ('OK','UNSUPPORTED'):
             counts['saved_ok' if status=='OK' else 'unsupported_saved'] += 1
@@ -147,12 +150,12 @@ def inventory(rows):
             'saby_requests_made':0,
             'note':'Оценка для обычного load, без --refresh. Время — только паузы, без ответов и повторов. '
                    'Сохранённые ответы повторно не читаются; изменённые продажи остаются '
-                   'неподтверждёнными до явного --refresh. Отсутствие Customer не доказывает отсутствие карты.'}
+                   'неподтверждёнными до явного --refresh. По правилу владельца продажи без Customer исключены из бонусных запросов.'}
 
 
 async def report(start, end, point=None):
     async with pool().acquire() as conn:
-        rows = await conn.fetch('''SELECT s.point_id,s.sale_id,s.is_return,
+        rows = await conn.fetch('''SELECT s.point_id,s.sale_id,s.is_return,s.customer_id,
             b.status,b.response,b.attempted_at,
             (b.fingerprint=md5(s.raw_json::text)) fresh,
             p.revenue,p.checks,p.fallback
@@ -174,7 +177,7 @@ def summarize(rows):
     debit = Decimal(0)
     accrual = Decimal(0)
     card_revenue = Decimal(0)
-    card_purchases = known = debit_known = accrual_known = missing_payments = 0
+    card_purchases = known = debit_known = accrual_known = missing_payments = no_card = 0
     fallback = 0
     for row in rows:
         if row['is_return']: continue
@@ -182,6 +185,9 @@ def summarize(rows):
         if revenue is None: missing_payments += 1
         else: total += Decimal(str(revenue))
         fallback += row['fallback'] or 0
+        if row.get('customer_id',1) is None:
+            no_card += 1
+            continue
         if row['status'] != 'OK' or not row['fresh']: continue
         known += 1
         body = row['response']
@@ -194,7 +200,8 @@ def summarize(rows):
             card_revenue += Decimal(str(revenue)); card_purchases += 1
     purchases = sum(not r['is_return'] for r in rows)
     return {'local_purchases':purchases,'bonus_responses_current':known,
-            'unconfirmed_purchases':purchases-known,'payment_revenue':str(total),
+            'no_card_by_owner_rule':no_card,
+            'unconfirmed_purchases':purchases-known-no_card,'payment_revenue':str(total),
             'missing_payment_purchases':missing_payments,'fallback_payment_rows':fallback,
             'bonus_debit_known':str(debit) if debit_known else None,
             'debit_value_count':debit_known,
