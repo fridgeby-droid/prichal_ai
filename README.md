@@ -1,4 +1,6 @@
-# Причал AI v0.3.36 — диагностика блокировки загрузчика
+# Причал AI v0.3.37 — приоритет новых продаж в бонусной очереди
+
+Сначала новые продажи, затем ошибки по давности проверки. Продолжение: `python -m scripts.saby_data resume`. Подробности: [BONUS-QUEUE-PRIORITY.md](BONUS-QUEUE-PRIORITY.md).
 
 Перед повторным запуском: `python -m scripts.bonuses plan`. Коды ошибок и состояние блокировки описаны в [BONUS-LOCK-DIAGNOSTICS.md](BONUS-LOCK-DIAGNOSTICS.md).
 

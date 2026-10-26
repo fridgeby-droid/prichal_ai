@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.36"
-BUILD_TAG = "bonus-lock-diagnostics"
+APP_VERSION = "0.3.37"
+BUILD_TAG = "bonus-new-sales-first"

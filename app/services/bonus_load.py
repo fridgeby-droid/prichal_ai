@@ -9,6 +9,10 @@ from app.services.bonus_probe import candidate_key, describe
 from app.services.order_transport import cooldown
 
 LOCK = 731031
+QUEUE_ORDER = '''CASE WHEN b.point_id IS NULL THEN 0
+                      WHEN b.status='ERROR' THEN 2 ELSE 1 END,
+                 CASE WHEN b.status='ERROR' THEN b.attempted_at END ASC NULLS FIRST,
+                 s.business_date,s.point_id,s.sale_id'''
 FIELDS = ('bonusAction','bonusDec','bonusInc','bonusIncDateTime',
           'availableBonusBalance','totalBonusBalance','availableBonusDec',
           'userBonusDec','availableBonusInc','cardId','personalCardId')
@@ -68,7 +72,7 @@ async def load(start=None, end=None, point=None, limit=100, refresh=False):
                     AND NOT ((s.point_id::text || ':' || s.sale_id::text)=ANY($6::text[]))
                     AND (b.point_id IS NULL
                       OR b.status='ERROR' OR ($4 AND b.attempted_at<$5))
-                    ORDER BY s.business_date,s.point_id,s.sale_id LIMIT 1''',
+                    ORDER BY ''' + QUEUE_ORDER + ''' LIMIT 1''',
                     start,end,point,refresh,started,failed_keys)
                 if not rows: break
                 row = rows[0]
@@ -169,6 +173,7 @@ def inventory(rows):
             if row['customer_id'] is not None: counts['pending_with_customer'] += 1
     return {**counts,'minimum_wait_hours':round(counts['pending_requests']*3/3600,2),
             'saby_requests_made':0,
+            'queue_order':'NEW_FIRST_THEN_OLDEST_ERRORS',
             'note':'Оценка для обычного load, без --refresh. Время — только паузы, без ответов и повторов. '
                    'Сохранённые ответы повторно не читаются; изменённые продажи остаются '
                    'неподтверждёнными до явного --refresh. По правилу владельца продажи без Customer исключены из бонусных запросов.'}
