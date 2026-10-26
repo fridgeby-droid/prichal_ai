@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.35"
-BUILD_TAG = "bonus-deferred-error-queue"
+APP_VERSION = "0.3.36"
+BUILD_TAG = "bonus-lock-diagnostics"

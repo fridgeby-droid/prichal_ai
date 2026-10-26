@@ -64,6 +64,17 @@ def test_unfinished_run_requires_resume(monkeypatch):
     mocks['sync_stores'].assert_not_called()
 
 
+def test_old_bonus_result_cleared_when_lock_blocks_resume(monkeypatch):
+    memory,mocks=setup(monkeypatch)
+    mocks['load'].return_value={'status':'PARTIAL_ERRORS','errors':1}
+    first=asyncio.run(m.update())
+    assert first['bonus_result']['errors']==1
+    mocks['load'].side_effect=ValueError('BONUS_LOADER_ALREADY_RUNNING')
+    second=asyncio.run(m.update(resume=True))
+    assert second['error_code']=='BONUS_LOADER_ALREADY_RUNNING'
+    assert 'bonus_result' not in second
+
+
 def test_no_customer_keeps_payment_denominator():
     result=summarize([dict(is_return=False,customer_id=None,status=None,fresh=None,
                           revenue=100,fallback=0,response=None)])

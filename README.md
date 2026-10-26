@@ -1,4 +1,6 @@
-# Причал AI v0.3.35 — очередь ошибок бонусов
+# Причал AI v0.3.36 — диагностика блокировки загрузчика
+
+Перед повторным запуском: `python -m scripts.bonuses plan`. Коды ошибок и состояние блокировки описаны в [BONUS-LOCK-DIAGNOSTICS.md](BONUS-LOCK-DIAGNOSTICS.md).
 
 Ошибки отдельных продаж больше не блокируют остальные записи. После установки продолжите `python -m scripts.saby_data resume`. Актуальные правила повторов: [BONUS-ERROR-QUEUE.md](BONUS-ERROR-QUEUE.md).
 

@@ -126,6 +126,11 @@ async def load(start=None, end=None, point=None, limit=100, refresh=False):
 async def plan(start=None, end=None, point=None):
     """Local inventory only. No calls to Saby, no guessed absence of loyalty."""
     async with pool().acquire() as conn:
+        lock_sessions = await conn.fetch('''SELECT l.pid, l.granted, a.state, a.state_change
+            FROM pg_locks l LEFT JOIN pg_stat_activity a ON a.pid=l.pid
+            WHERE l.locktype='advisory' AND l.classid=0 AND l.objid=$1
+              AND l.objsubid=1
+              AND l.database=(SELECT oid FROM pg_database WHERE datname=current_database())''', LOCK)
         rows = await conn.fetch('''SELECT s.raw_json,s.customer_id,b.status,
             (b.fingerprint=md5(s.raw_json::text)) fresh
             FROM retail_sales s LEFT JOIN bonus_observations b USING(point_id,sale_id)
@@ -133,7 +138,10 @@ async def plan(start=None, end=None, point=None):
             AND ($1::date IS NULL OR s.business_date >= $1)
             AND ($2::date IS NULL OR s.business_date <= $2)
             AND ($3::bigint IS NULL OR s.point_id=$3)''',start,end,point)
-    return inventory(rows)
+    return {**inventory(rows),'loader_lock_sessions':[
+        {k:(str(v) if k=='state_change' and v is not None else v) for k,v in dict(r).items()}
+        for r in lock_sessions],
+        'lock_note':'Блокировка означает занятый сеанс; idle в PostgreSQL не доказывает зависание: загрузчик может ждать Saby.'}
 
 
 def inventory(rows):

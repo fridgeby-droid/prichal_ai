@@ -11,6 +11,7 @@ from app.services.backfill import backfill_service
 from app.services.payroll import payroll_service
 from app.services.catalog_categories import sync_catalog,META_KEY
 from app.services.price_lists import list_prices,get_price,allowed_point
+from app.services.safe_errors import error_details
 
 KEY='maintenance:saby:active:v1'
 LOCK=731033
@@ -105,6 +106,7 @@ async def update(start=None,end=None,all_history=False,resume=False):
             state['status']='RUNNING'
             state.pop('error_type',None)
             state.pop('error_code',None)
+            state.pop('next',None)
             async def stage(name,fn):
                 if name in state['done']: return
                 state['current_stage']=name
@@ -127,6 +129,8 @@ async def update(start=None,end=None,all_history=False,resume=False):
             async def catalog():
                 await sync_catalog(True)
             async def bonuses():
+                state.pop('bonus_result',None)
+                await save(KEY,state)
                 result=await bonus_load.load(limit=0)
                 state['bonus_result']=result
                 if result['status'] in ('STOPPED','PARTIAL_ERRORS'): raise ValueError('BONUS_LOAD_INCOMPLETE')
@@ -154,9 +158,7 @@ async def update(start=None,end=None,all_history=False,resume=False):
                 await stage('bonuses_all_local_customer_sales',bonuses)
             except Exception as exc:
                 state['status']='ERROR'
-                state['error_type']=type(exc).__name__
-                # Never expose raw upstream URLs, customer values or credentials.
-                state['error_code']='STAGE_FAILED_SEE_LOCAL_STATUS'
+                state.update(error_details(exc))
                 await save(KEY,state)
                 return state
             state['status']='COMPLETED'

@@ -5,6 +5,7 @@ import logging
 from datetime import date
 from app.db.database import init_db,close_db
 from app.services.bonus_load import load,report,plan
+from app.services.safe_errors import error_details
 
 
 async def run(args):
@@ -33,7 +34,7 @@ def main():
     logging.getLogger('httpcore').setLevel(logging.WARNING)
     try: result=asyncio.run(run(args))
     except Exception as exc:
-        print(json.dumps({'status':'FAILED','error_type':type(exc).__name__}))
+        print(json.dumps({'status':'FAILED',**error_details(exc)},ensure_ascii=False))
         raise SystemExit(1)
     print(json.dumps(result,ensure_ascii=False,indent=2))
     if result.get('status') in ('STOPPED','PARTIAL_ERRORS'): raise SystemExit(1)
