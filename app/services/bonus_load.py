@@ -34,6 +34,9 @@ async def read_bonus(key):
             return normalize(await saby_client._get(f'/retail/order/{key}/bonus-read', {}))
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
+            limited, seconds = cooldown(exc.response)
+            if limited and attempt == 3:
+                raise ValueError('RETRY_LATER') from None
             if status not in (429,500,502,503,504) or attempt == 3:
                 raise ValueError(f'HTTP_{status}') from None
             _, seconds = cooldown(exc.response)
@@ -51,6 +54,8 @@ async def load(start=None, end=None, point=None, limit=100, refresh=False):
             raise ValueError('BONUS_LOADER_ALREADY_RUNNING')
         started = datetime.now(timezone.utc)
         counts = {'saved':0,'unsupported':0,'errors':0}
+        failed_keys = []
+        consecutive_errors = 0
         try:
             while True:
                 rows = await conn.fetch('''SELECT s.point_id,s.sale_id,s.raw_json,
@@ -60,10 +65,11 @@ async def load(start=None, end=None, point=None, limit=100, refresh=False):
                     AND ($1::date IS NULL OR s.business_date >= $1)
                     AND ($2::date IS NULL OR s.business_date <= $2)
                     AND ($3::bigint IS NULL OR s.point_id=$3)
+                    AND NOT ((s.point_id::text || ':' || s.sale_id::text)=ANY($6::text[]))
                     AND (b.point_id IS NULL
                       OR b.status='ERROR' OR ($4 AND b.attempted_at<$5))
                     ORDER BY s.business_date,s.point_id,s.sale_id LIMIT 1''',
-                    start,end,point,refresh,started)
+                    start,end,point,refresh,started,failed_keys)
                 if not rows: break
                 row = rows[0]
                 raw = row['raw_json']
@@ -98,14 +104,21 @@ async def load(start=None, end=None, point=None, limit=100, refresh=False):
                     json.dumps(data) if data is not None else None,error)
                 counts[{'OK':'saved','ERROR':'errors','UNSUPPORTED':'unsupported'}[status]] += 1
                 if status == 'ERROR':
-                    return {**counts,'status':'STOPPED','error':error,
-                            'point_id':str(row['point_id']),'sale_id':str(row['sale_id']),
-                            'next':'Повторите ту же команду: сохранённые ответы не загружаются повторно.'}
+                    failed_keys.append(f"{row['point_id']}:{row['sale_id']}")
+                    consecutive_errors += 1
+                    print(f"Bonus deferred: point={row['point_id']} sale={row['sale_id']} code={error}",flush=True)
+                    if error in {'HTTP_401','HTTP_403','HTTP_429','RETRY_LATER'} or consecutive_errors >= 5:
+                        return {**counts,'status':'STOPPED','error':error,
+                                'reason':'GLOBAL_OR_REPEATED_FAILURE','complete_history':False,
+                                'next':'Повторите команду позже: сохранённые ответы пропускаются.'}
+                else:
+                    consecutive_errors = 0
                 if sum(counts.values()) % 25 == 0:
                     print(f'Bonus loading: {sum(counts.values())} processed; saved={counts["saved"]}',flush=True)
                 if limit and sum(counts.values()) >= limit:
-                    return {**counts,'status':'BATCH_FINISHED','complete_history':False}
-            return {**counts,'status':'LOCAL_SALES_PROCESSED','complete_history':False}
+                    return {**counts,'status':'PARTIAL_ERRORS' if counts['errors'] else 'BATCH_FINISHED','complete_history':False}
+            return {**counts,'status':'PARTIAL_ERRORS' if counts['errors'] else 'LOCAL_SALES_PROCESSED',
+                    'complete_history':False}
         finally:
             await conn.execute('SELECT pg_advisory_unlock($1)', LOCK)
 

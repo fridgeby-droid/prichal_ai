@@ -36,7 +36,7 @@ def main():
         print(json.dumps({'status':'FAILED','error_type':type(exc).__name__}))
         raise SystemExit(1)
     print(json.dumps(result,ensure_ascii=False,indent=2))
-    if result.get('status')=='STOPPED': raise SystemExit(1)
+    if result.get('status') in ('STOPPED','PARTIAL_ERRORS'): raise SystemExit(1)
 
 
 if __name__=='__main__': main()

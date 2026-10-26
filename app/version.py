@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.34"
-BUILD_TAG = "price-list-terminal-empty-object"
+APP_VERSION = "0.3.35"
+BUILD_TAG = "bonus-deferred-error-queue"

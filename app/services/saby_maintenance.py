@@ -129,7 +129,7 @@ async def update(start=None,end=None,all_history=False,resume=False):
             async def bonuses():
                 result=await bonus_load.load(limit=0)
                 state['bonus_result']=result
-                if result['status']=='STOPPED': raise ValueError('BONUS_LOAD_STOPPED')
+                if result['status'] in ('STOPPED','PARTIAL_ERRORS'): raise ValueError('BONUS_LOAD_INCOMPLETE')
             try:
                 await stage('stores',sync_service.sync_stores)
                 await stage('sales_payments_items_shifts_reconcile',sales)
