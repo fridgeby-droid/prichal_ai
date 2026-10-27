@@ -9,11 +9,15 @@ from app.services.safe_errors import error_details
 
 
 async def run(args):
-    await init_db()
+    stage='database_connect' if args.action in ('plan','report') else 'database_prepare'
     try:
+        await init_db(prepare_schema=args.action=='load')
+        stage='bonus_'+args.action
         if args.action=='plan': return await plan(args.start,args.end,args.point_id)
         if args.action=='report': return await report(args.start,args.end,args.point_id)
         return await load(args.start,args.end,args.point_id,0 if args.all else args.limit,args.refresh)
+    except TimeoutError:
+        return {'status':'FAILED','error_type':'TimeoutError','stage':stage}
     finally: await close_db()
 
 
@@ -36,8 +40,8 @@ def main():
     except Exception as exc:
         print(json.dumps({'status':'FAILED',**error_details(exc)},ensure_ascii=False))
         raise SystemExit(1)
-    print(json.dumps(result,ensure_ascii=False,indent=2))
-    if result.get('status') in ('STOPPED','PARTIAL_ERRORS'): raise SystemExit(1)
+    print(json.dumps(result,ensure_ascii=False,indent=2,default=str))
+    if result.get('status') in ('STOPPED','PARTIAL_ERRORS','FAILED'): raise SystemExit(1)
 
 
 if __name__=='__main__': main()

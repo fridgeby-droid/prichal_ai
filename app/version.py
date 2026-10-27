@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.37"
-BUILD_TAG = "bonus-new-sales-first"
+APP_VERSION = "0.3.38"
+BUILD_TAG = "business-analytics-traffic-ready"

@@ -21,6 +21,9 @@ def test_inventory_counts_changes_without_scheduling_repeat():
 def test_plan_never_calls_saby(monkeypatch):
     class C(Conn):
         async def fetch(self,*args): return []
+        async def fetchrow(self,sql,*args):
+            assert 'raw_json' not in sql and 'md5' not in sql
+            return {'pending_requests':0}
     monkeypatch.setattr(b,'pool',lambda:Pool(C()))
     get=AsyncMock()
     monkeypatch.setattr(b.saby_client,'_get',get)

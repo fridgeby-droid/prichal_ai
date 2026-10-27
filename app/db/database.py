@@ -125,7 +125,7 @@ def build_ssl_context(
     return context
 
 
-async def init_db() -> None:
+async def init_db(prepare_schema: bool = True) -> None:
     global _pool
 
     if _pool is not None:
@@ -151,6 +151,8 @@ async def init_db() -> None:
         },
     )
 
+    if not prepare_schema:
+        return
     schema_path = Path(__file__).with_name("schema.sql")
     schema_sql = schema_path.read_text(encoding="utf-8")
 

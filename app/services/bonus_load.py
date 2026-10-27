@@ -135,14 +135,35 @@ async def plan(start=None, end=None, point=None):
             WHERE l.locktype='advisory' AND l.classid=0 AND l.objid=$1
               AND l.objsubid=1
               AND l.database=(SELECT oid FROM pg_database WHERE datname=current_database())''', LOCK)
-        rows = await conn.fetch('''SELECT s.raw_json,s.customer_id,b.status,
-            (b.fingerprint=md5(s.raw_json::text)) fresh
+        counts = dict(await conn.fetchrow('''SELECT COUNT(*) local_sales,
+            COUNT(*) FILTER(WHERE s.customer_id IS NULL) excluded_without_customer,
+            COUNT(*) FILTER(WHERE s.customer_id IS NOT NULL AND b.status='OK') saved_ok,
+            COUNT(*) FILTER(WHERE s.customer_id IS NOT NULL AND b.status='UNSUPPORTED') unsupported_saved,
+            COUNT(*) FILTER(WHERE s.customer_id IS NOT NULL AND b.point_id IS NULL) new_sales,
+            COUNT(*) FILTER(WHERE s.customer_id IS NOT NULL AND b.status='ERROR') retry_errors,
+            COUNT(*) FILTER(WHERE s.customer_id IS NOT NULL AND (b.point_id IS NULL OR b.status='ERROR')
+                AND NULLIF(s.sale_key,'') IS NOT NULL) pending_requests,
+            COUNT(*) FILTER(WHERE s.customer_id IS NOT NULL AND (b.point_id IS NULL OR b.status='ERROR')
+                AND NULLIF(s.sale_key,'') IS NULL) pending_without_key,
+            MAX(b.attempted_at) last_attempt_at,
+            MAX(b.attempted_at) FILTER(WHERE b.status='OK') last_success_at
             FROM retail_sales s LEFT JOIN bonus_observations b USING(point_id,sale_id)
             WHERE NOT s.deleted
             AND ($1::date IS NULL OR s.business_date >= $1)
             AND ($2::date IS NULL OR s.business_date <= $2)
-            AND ($3::bigint IS NULL OR s.point_id=$3)''',start,end,point)
-    return {**inventory(rows),'loader_lock_sessions':[
+            AND ($3::bigint IS NULL OR s.point_id=$3)''',start,end,point))
+        errors=[dict(r) for r in await conn.fetch('''SELECT b.point_id,b.sale_id,b.error_code,b.attempted_at
+            FROM bonus_observations b JOIN retail_sales s USING(point_id,sale_id)
+            WHERE b.status='ERROR' AND NOT s.deleted AND s.customer_id IS NOT NULL
+              AND ($1::date IS NULL OR s.business_date >= $1)
+              AND ($2::date IS NULL OR s.business_date <= $2)
+              AND ($3::bigint IS NULL OR s.point_id=$3)
+            ORDER BY b.attempted_at DESC LIMIT 10''',start,end,point)]
+    return {**counts,'minimum_wait_hours':round(counts['pending_requests']*3/3600,2),
+        'changed_saved':None,'freshness_checked':False,'uuid_validation_performed':False,
+        'queue_order':'NEW_FIRST_THEN_OLDEST_ERRORS','saby_requests_made':0,'recent_errors':errors,
+        'note':'Лёгкий подсчёт по локальным полям. Контрольные суммы и UUID не проверялись; pending_requests — оценка по наличию ключа. Это не полнота Saby.',
+        'loader_lock_sessions':[
         {k:(str(v) if k=='state_change' and v is not None else v) for k,v in dict(r).items()}
         for r in lock_sessions],
         'lock_note':'Блокировка означает занятый сеанс; idle в PostgreSQL не доказывает зависание: загрузчик может ждать Saby.'}

@@ -41,7 +41,7 @@ def numeric(value):
     except (ValueError,InvalidOperation): return None
 
 
-def modifiers(sales,query=''):
+def modifiers(sales,query='',match='contains'):
     groups={}
     for sale in sales:
         for node in nodes(sale['raw_json']):
@@ -50,7 +50,11 @@ def modifiers(sales,query=''):
             name=str(item.get('Name') or '')
             pid=str(item.get('Nomenclature') or '')
             uuid=str(item.get('NomenclatureUUID') or '')
-            if query and query.casefold() not in name.casefold() and query not in (pid,uuid): continue
+            if query:
+                matches = (query.casefold()==name.casefold() if match=='exact' else
+                           query in (pid,uuid,'id:'+pid,'uuid:'+uuid) if match=='id' else
+                           query.casefold() in name.casefold() or query in (pid,uuid))
+                if not matches: continue
             quantity=numeric(item.get('Quantity'))
             if quantity is None: raise ValueError('MODIFIER_QUANTITY_UNKNOWN: нельзя считать отсутствующее количество нулём')
             product_key='uuid:'+uuid if uuid else 'id:'+pid if pid else f"unknown:{sale['point_id']}:{sale['sale_id']}:{node['line_key']}"
@@ -58,9 +62,12 @@ def modifiers(sales,query=''):
             key=(sale['point_id'],sale['seller_id'],product_key,unit)
             row=groups.setdefault(key,dict(point_id=sale['point_id'],seller_id=sale['seller_id'],seller_name=sale['seller_name'],
                 product_key=product_key,name=name,unit=unit,quantity=Decimal(0),return_quantity=Decimal(0),
-                revenue=Decimal(0),unknown_amount_lines=0,purchases=set()))
+                revenue=Decimal(0),return_revenue=Decimal(0),unknown_return_lines=0,unknown_amount_lines=0,purchases=set()))
             if node['is_return']:
                 row['return_quantity']+=abs(quantity)
+                amount=numeric(item.get('TotalPrice'))
+                if amount is None: row['unknown_return_lines']+=1
+                else: row['return_revenue']+=abs(amount)
             else:
                 row['quantity']+=quantity
                 row['purchases'].add((sale['point_id'],sale['sale_id']))
@@ -70,4 +77,5 @@ def modifiers(sales,query=''):
     for row in groups.values():
         row['purchases']=len(row['purchases'])
         if row['unknown_amount_lines']: row['revenue']=None
+        if row['unknown_return_lines']: row['return_revenue']=None
     return list(groups.values())

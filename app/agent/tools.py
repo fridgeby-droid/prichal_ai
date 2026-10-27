@@ -19,7 +19,8 @@ def _dump(data: dict | list) -> str:
 @tool
 async def get_detail_report(kind: str, date_from: str = '', date_to: str = '', point_id: str = '',
                             seller_id: str = '', shift: str = '', query: str = '',
-                            min_days: int = 0, max_days: int = -1, offset: int = 0) -> str:
+                            min_days: int = 0, max_days: int = -1, offset: int = 0,
+                            match: str = 'contains', frequency_filter: str = '') -> str:
     """Детальная аналитика локальных продаж без запросов Saby.
 
     Args:
@@ -33,9 +34,43 @@ async def get_detail_report(kind: str, date_from: str = '', date_to: str = '', p
         min_days: Минимальная давность покупки включительно для clients.
         max_days: Максимальная давность включительно; -1 без верхней границы.
         offset: Смещение страницы клиентов/товаров, по 50 групп.
+        match: contains — подстрока; exact — точное название; id — точный числовой ID или UUID товара.
+        frequency_filter: clients: one_purchase, multiple_one_day, repeat_visits либо пусто.
     """
     from app.services.detail_reports import report
-    return _dump(await report(kind,date_from,date_to,point_id,seller_id,shift,query,min_days,None if max_days==-1 else max_days,offset))
+    return _dump(await report(kind,date_from,date_to,point_id,seller_id,shift,query,min_days,None if max_days==-1 else max_days,offset,match,frequency_filter))
+
+
+@tool
+async def get_extra_report(kind: str, start: str = '', end: str = '', previous_start: str = '', previous_end: str = '',
+                           point_id: str = '', seller_id: str = '', shift: str = '', query: str = '',
+                           match: str = 'contains', customer_id: str = '', modifiers: bool = False, offset: int = 0) -> str:
+    """Локальные отчёты без запросов Saby.
+
+    Args:
+        kind: compare — сравнение товаров; customer — карточка клиента; payments — диагностика оплат.
+        start: Начало текущего периода YYYY-MM-DD.
+        end: Конец периода или дата отсечения карточки клиента YYYY-MM-DD.
+        previous_start: Начало базы сравнения.
+        previous_end: Конец базы сравнения.
+        point_id: ID точки, пусто для сети (кроме customer, где всегда сеть).
+        seller_id: Учётка продавца для compare.
+        shift: DAY/NIGHT для compare или пусто.
+        query: Название или ID товара для compare.
+        match: contains, exact или id.
+        customer_id: Известный ID клиента для customer; не номер карты.
+        modifiers: Для compare считать явные модификаторы вместо обычных позиций.
+        offset: Смещение страницы, 50 строк.
+    """
+    from app.services.extra_reports import product_comparison,customer_card,payment_audit
+    if kind=='compare': result=await product_comparison(start,end,previous_start,previous_end,point_id,seller_id,shift,query,match,modifiers,offset)
+    elif kind=='customer': result=await customer_card(customer_id,end,offset)
+    elif kind=='payments': result=await payment_audit(start,end,point_id,offset)
+    else: raise ValueError('Неизвестный отчёт')
+    # Keep the complete export server-side; model receives only selected page.
+    result['rows']=result['rows'][offset:offset+50]
+    if 'product_totals' in result: result['product_totals']=result['product_totals'][:50]
+    return _dump(result)
 
 
 @tool
@@ -336,3 +371,21 @@ async def get_seller_month_payroll_preview(
             month_date
         )
     )
+@tool
+async def get_advanced_report(kind: str, start: str, end: str, point_id: str = '',
+                              previous_start: str = '', previous_end: str = '', offset: int = 0,
+                              min_pairs: int = 3) -> str:
+    """Локальные продажи: decomposition, hours, copurchases, customers, retention, returns, discounts, anomalies,
+    crosssell, substitution, regularity, local_assortment, basket_structure, customer_moves,
+    customer_comebacks, customer_value, concentration, seller_comparison, loyalty, traffic.
+
+    Даты YYYY-MM-DD. decomposition/substitution требуют previous_start/end, предшествующие текущему периоду.
+    crosssell/substitution требуют настроенных правил стабильных ID; RULES_REQUIRED — не нулевые продажи.
+    traffic NOT_CONNECTED до привязки счётчиков. loyalty только сохранённые бонусные ответы; неизвестное не ноль.
+    Суммы уникальных продаж TotalPrice НЕ платёжная выручка. Доли 0..1, возвраты отдельно.
+    Новые клиенты — впервые наблюдаемые; неполные месяцы retention неизвестны.
+    Аномалии — эвристика, не доказанная причина. Страница 50 строк, offset для продолжения.
+    """
+    from app.services.advanced_reports import report
+    return _dump(await report(kind,start,end,point_id,previous_start,previous_end,offset,min_pairs))
+

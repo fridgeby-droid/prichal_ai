@@ -5,6 +5,8 @@ from zoneinfo import ZoneInfo
 from app.config import get_settings
 from app.agent.tools import (
     get_detail_report,
+    get_extra_report,
+    get_advanced_report,
     get_core_status,
     get_period_summary,
     compare_sales_periods,
@@ -128,6 +130,17 @@ NIGHT = 20:00–07:59 следующего календарного дня.
     observation_warning запрещает объявлять отсутствующий товар/магазин нулевыми продажами.
     quality_current и quality_previous содержат точные проверенные/непроверенные даты.
     STALE означает новую загрузку после сверки. Не заменяй его на OK.
+24. get_advanced_report предоставляет расширенную аналитику: допродажи, ассортимент,
+    структуру покупки, переходы/возвраты клиентов, концентрацию, сопоставимые учётки,
+    бонусы и остальные виды из описания инструмента. Суммы здесь относятся к TotalPrice
+    уникальных продаж или явно подписанным товарным строкам, НЕ к платёжной выручке.
+    Доли 0…1. Не складывай независимые разделы/разрезы. Для продолжения используй next_offset.
+    RULES_REQUIRED означает отсутствие правил, а не отсутствие допродаж.
+    NOT_CONNECTED у traffic означает, что трафик и конверсия пока неизвестны.
+    Бонусы с неподтверждёнными ответами не равны нулю. bonusInc — к начислению,
+    не доказанное проведённое начисление. Без подтверждённого курса не переводить баллы
+    в рубли и не делить баллы на выручку как денежный процент. Сравнение групп не доказывает
+    эффект программы. Сопоставимые учётки не дают рейтинга реальных сотрудников без Core.
 """
 
 def current_instructions(context, agent):
@@ -141,6 +154,8 @@ executive_agent = Agent(
     model=settings.openai_default_model,
     tools=[
         get_detail_report,
+        get_extra_report,
+        get_advanced_report,
         get_period_summary,
         compare_sales_periods,
         get_day_night_breakdown,

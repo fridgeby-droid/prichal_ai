@@ -9,6 +9,7 @@ from app.db.database import pool
 from app.services import period_reports as p
 from app.services.management_reports import dec, money
 from app.services.sale_tree import modifiers
+from app.services.report_helpers import quantity,product_totals,frequency
 
 
 PAYMENTS = '''SELECT p.point_id,p.seller_id,MAX(p.seller_name) seller_name,
@@ -31,6 +32,7 @@ ITEMS = '''SELECT s.point_id,s.seller_id,MAX(s.seller_name) seller_name,
  MAX(i.name) name,i.unit_name unit,
  SUM(CASE WHEN i.is_return OR s.is_return THEN 0 ELSE i.quantity END) quantity,
  SUM(CASE WHEN i.is_return OR s.is_return THEN ABS(i.quantity) ELSE 0 END) return_quantity,
+ SUM(CASE WHEN i.is_return OR s.is_return THEN ABS(i.total_price) ELSE 0 END) return_revenue,
  SUM(CASE WHEN i.is_return OR s.is_return THEN 0 ELSE i.total_price END) revenue,
  COUNT(DISTINCT (i.point_id,i.sale_id)) FILTER(WHERE NOT i.is_return AND NOT s.is_return) purchases
  FROM retail_sale_items i JOIN retail_sales s USING(point_id,sale_id)
@@ -107,10 +109,14 @@ def recency(rows, as_of, minimum=0, maximum=None):
     return result
 
 
-async def report(kind,start='',end='',point_id='',seller_id='',shift='',query='',min_days=0,max_days=None,offset=0):
+async def report(kind,start='',end='',point_id='',seller_id='',shift='',query='',min_days=0,max_days=None,offset=0,
+                 match='contains',frequency_filter='',export_all=False):
     if kind not in ('averages','quantities','modifiers','basket','trend','clients'): raise ValueError('Неизвестный отчёт.')
     if kind=='clients' and (seller_id or shift or query): raise ValueError('Давность клиентов: фильтры продавца, смены и товара не поддерживаются.')
     if query and kind not in ('quantities','modifiers'): raise ValueError('Поиск товара доступен в quantities/modifiers.')
+    if match not in ('contains','exact','id'): raise ValueError('match: contains, exact или id')
+    if frequency_filter not in ('','one_purchase','multiple_one_day','repeat_visits'): raise ValueError('Неизвестная группа посещений')
+    if frequency_filter and kind!='clients': raise ValueError('Группа посещений доступна только для clients')
     point=await p.point_filter(point_id)
     seller=number(seller_id)
     shift=shift.upper() if shift else None
@@ -128,17 +134,23 @@ async def report(kind,start='',end='',point_id='',seller_id='',shift='',query=''
             if first is None: return {'report_text':'Нет локальных продаж. Это не подтверждает отсутствие продаж в Saby.','complete_source':False}
             args=(first,last,point,seller,shift)
             payment_rows=[dict(r) for r in await conn.fetch(PAYMENTS,*args)] if kind in ('averages','trend') else []
-            sale_rows=[dict(r) for r in await conn.fetch(SALES,*args)] if kind=='averages' else []
+            sale_rows=[dict(r) for r in await conn.fetch(SALES,*args)] if kind in ('averages','quantities','modifiers') else []
             sync_rows=await conn.fetch('SELECT status,started_at,finished_at FROM sync_runs ORDER BY id DESC LIMIT 1')
-            item_rows=[dict(r) for r in await conn.fetch(ITEMS,*args,query or None)] if kind in ('quantities','basket') else []
+            item_sql=ITEMS
+            if match!='contains':
+                predicate=('LOWER(i.name)=LOWER($6)' if match=='exact' else
+                    "i.product_id::TEXT=$6 OR i.product_uuid=$6 OR 'id:'||i.product_id::TEXT=$6 OR 'uuid:'||i.product_uuid=$6")
+                item_sql=ITEMS.replace('POSITION(LOWER($6) IN LOWER(i.name))>0\n OR i.product_id::TEXT=$6 OR i.product_uuid=$6',predicate)
+            item_rows=[dict(r) for r in await conn.fetch(item_sql,*args,query or None)] if kind in ('quantities','basket') else []
             if kind=='modifiers':
-                item_rows=modifiers(await conn.fetch(MODIFIER_SALES,*args),query)
+                item_rows=modifiers(await conn.fetch(MODIFIER_SALES,*args),query,match)
             basket_rows=[dict(r) for r in await conn.fetch(BASKETS,*args)] if kind=='basket' else []
             client_rows=[dict(r) for r in await conn.fetch(CLIENTS,last,point)] if kind=='clients' else []
     result={'kind':kind,'date_from':first.isoformat(),'date_to':last.isoformat(),'point_id':str(point) if point else None,
             'seller_id':str(seller) if seller else None,'shift':shift,'complete_source':False,
             'last_sync':dict(sync_rows[0]) if sync_rows else None,'generated_at':datetime.now(ZoneInfo(get_settings().business_tz)).isoformat()}
-    lines=[f'Детальный отчёт: {kind}; {first} → {last}',
+    title={'averages':'Средние суммы покупок и платежей','quantities':'Количество товаров','modifiers':'Проданные модификаторы','basket':'Наполняемость покупки','trend':'Динамика продаж','clients':'Клиенты по давности покупок'}[kind]
+    lines=[f'{title}; {first} → {last}',
            f'Точка: {point or "сеть"}; учётка продавца: {seller or "все"}; смена: {shift or "все"}']
     if kind in ('averages','trend'):
         result['totals']=sums(payment_rows)
@@ -151,10 +163,10 @@ async def report(kind,start='',end='',point_id='',seller_id='',shift='',query=''
                     'weekdays':grouped(payment_rows,lambda r:str(r['business_date'].weekday()))}
         result['groups']=groups
         for label, values in groups.items():
-            lines.append(label)
+            lines.append({'network':'Сеть / выборка','stores':'Магазины','sellers':'Учётки продавцов','days':'Дни','weekdays':'Дни недели'}.get(label,label))
             for row in values:
                 title=names.get(row['id'],row['id']) if label=='stores' else seller_names.get(row['id'],row['id']) if label=='sellers' else row['id']
-                text=f"{title} [ID {row['id']}]: {money(row['revenue'])} ₽; записей {row['checks']}; СЧ {money(row['average'])} ₽; возвраты {money(row['returns'])} ₽; fallback {row['fallback']}"
+                text=f"{title} [ID {row['id']}]: {money(row['revenue'])} ₽; платёжных записей {row['checks']}; среднее по платежам {money(row['average'])} ₽; возвраты {money(row['returns'])} ₽; fallback {row['fallback']}"
                 if label=='weekdays':
                     count=sum((first+timedelta(days=i)).weekday()==int(row['id']) for i in range((last-first).days+1))
                     row['calendar_occurrences']=count
@@ -168,18 +180,33 @@ async def report(kind,start='',end='',point_id='',seller_id='',shift='',query=''
                                      'sellers':grouped(sale_rows,lambda r:str(r['seller_id']) if r['seller_id'] is not None else 'UNKNOWN')}
             lines.append('Отдельно: средняя сумма продажи Saby = TotalPrice / число продаж (point_id + sale_id). Не платёжная выручка, не подтверждённый фискальный чек.')
             for label,values in result['sale_averages'].items():
-                for row in values: lines.append(f"{label} ID {row['id']}: продаж {row['checks']}; средняя сумма {money(row['average'])} ₽")
+                for row in values:
+                    title=names.get(row['id'],row['id']) if label=='stores' else seller_names.get(row['id'],row['id']) if label=='sellers' else row['id']
+                    lines.append(f"{title} [ID {row['id']}]: продаж {row['checks']}; средняя сумма продажи {money(row['average'])} ₽")
     elif kind in ('quantities','modifiers'):
+        result['product_totals']=product_totals(item_rows,sale_rows)
+        result['store_product_totals']=product_totals(item_rows,sale_rows,True)
+        for label,values in [('Итоги по выборке',result['product_totals']),('Итоги по магазинам',result['store_product_totals'])]:
+            lines.append(label)
+            for row in values[:50]:
+                title=names.get(str(row['point_id']),'Сеть / выборка')
+                lines.append(f"{title}: {row['name']} [{row['product_key']}] — {quantity(row['quantity'])} {row['unit']}; возврат {quantity(row['return_quantity'])}; сумма {money(row['revenue'])} ₽; покупок {row['purchases']} из {row['eligible_purchases']}; доля {money(row['purchase_share_percent'])}%")
+            if len(values)>50: lines.append('Показаны первые 50 итогов; полный список доступен в CSV.')
         item_rows.sort(key=lambda r:(-dec(r['revenue']),str(r['point_id']),str(r['seller_id']),r['product_key'],r['unit']))
         result['total_groups']=len(item_rows)
-        result['rows']=item_rows[offset:offset+50]
-        result['next_offset']=offset+50 if offset+50<len(item_rows) else None
+        result['rows']=item_rows if export_all else item_rows[offset:offset+50]
+        result['next_offset']=offset+50 if not export_all and offset+50<len(item_rows) else None
         for row in result['rows']:
             row['point_id']=str(row['point_id'])
             row['seller_id']=str(row['seller_id']) if row['seller_id'] is not None else None
             row['average_unit_price']=dec(row['revenue'])/dec(row['quantity']) if row['revenue'] is not None and dec(row['quantity']) else None
-            lines.append(f"{row['name']} [{row['product_key']}; {row['unit']}], {names.get(str(row['point_id']),row['point_id'])}, {row['seller_name']} [ID {row['seller_id']}]: количество {row['quantity']}; возврат количества {row['return_quantity']}; сумма {money(row['revenue'])} ₽; средняя цена {money(row['average_unit_price'])}; покупок с товаром {row['purchases']}")
+            base=sum(r['checks'] for r in sale_rows if str(r['point_id'])==row['point_id'] and r['seller_id']==(int(row['seller_id']) if row['seller_id'] is not None else None))
+            row['eligible_purchases']=base
+            row['purchase_share_percent']=Decimal(row['purchases'])*100/base if base else None
+            if not export_all:
+                lines.append(f"{row['name']} [{row['product_key']}; {row['unit']}], {names.get(str(row['point_id']),row['point_id'])}, {row['seller_name']} [ID {row['seller_id']}]: количество {quantity(row['quantity'])}; возврат количества {quantity(row['return_quantity'])}; сумма {money(row['revenue'])} ₽; средняя цена {money(row['average_unit_price'])}; покупок с товаром {row['purchases']} из {base}; доля {money(row['purchase_share_percent'])}%")
         lines.append(f"Групп {len(item_rows)}; следующая страница offset={result['next_offset']}. Количества разных единиц не суммируются. Средняя цена = сумма / количество, не прайс.")
+        lines.append('Доля по каждому товару отдельно: уникальные покупки с товаром / все невозвратные продажи выбранной области. Доли разных товаров не складываются.')
         if kind=='modifiers':
             lines.append('Обход SaleNomenclatures и вложенных Positions из сохранённых продаж; только явный IsModifier=true. Повторы одного ID/Key внутри продажи считаются один раз; конфликт останавливает отчёт. Количество не умножается на основную позицию. Неизвестная сумма — н/д, не ноль; суммы модификаторов нельзя прибавлять к выручке родительских товаров. Пустой результат не доказывает отсутствие модификаторов.')
     elif kind=='basket':
@@ -193,20 +220,24 @@ async def report(kind,start='',end='',point_id='',seller_id='',shift='',query=''
         result['quantity_per_purchase_by_unit']={u:q/n for u,q in units.items()} if n else {}
         lines.extend([f"Покупок (point_id + sale_id): {n}; без товарных строк: {result['purchases_without_items']}",
                       f"Строк на покупку: {money(result['lines_per_purchase'])}; разных товаров: {money(result['products_per_purchase'])}",
-                      'Количество на покупку по единицам: '+str(result['quantity_per_purchase_by_unit']),
+                      'Количество на покупку: '+'; '.join(f'{quantity(q)} {u}' for u,q in result['quantity_per_purchase_by_unit'].items()),
                       'Это наполняемость продажи Saby, не платёжной записи. Покупки без строк включены в знаменатель; полнота не подтверждена.'])
     else:
         selected=recency(client_rows,last,min_days,max_days)
+        result['frequency_groups']={key:sum(frequency(r)==key for r in selected) for key in ('one_purchase','multiple_one_day','repeat_visits')}
+        if frequency_filter: selected=[r for r in selected if frequency(r)==frequency_filter]
         result['total_clients']=len(client_rows)
         result['selected_clients']=len(selected)
-        result['rows']=selected[offset:offset+50]
-        result['next_offset']=offset+50 if offset+50<len(selected) else None
+        result['rows']=selected if export_all else selected[offset:offset+50]
+        result['next_offset']=offset+50 if not export_all and offset+50<len(selected) else None
         result['segments']={key:sum(r['segment']==key for r in recency(client_rows,last)) for key in ('0-29','30-59','60-89','90+')}
-        lines.extend([f"Клиентов с ID в локальных продажах: {len(client_rows)}; в выбранной группе: {len(selected)}",str(result['segments']),
+        lines.extend([f"Клиентов с ID в локальных продажах: {len(client_rows)}; в выбранной группе: {len(selected)}",'; '.join(f'{k} дней: {v}' for k,v in result['segments'].items()),
+                      'В интервале давности, до фильтра посещений — одна покупка: '+str(result['frequency_groups']['one_purchase'])+'; несколько покупок в один день: '+str(result['frequency_groups']['multiple_one_day'])+'; повторные посещения: '+str(result['frequency_groups']['repeat_visits']),
                       'История до даты '+str(last)+' включительно; начало периода не ограничивает поиск последней покупки.'])
         for row in result['rows']:
-            lines.append(f"Клиент ID {row['customer_id']}: последняя покупка {row['last_purchase']}; дней {row['days_since_purchase']}; покупок {row['purchases']}; дней посещений {row['visit_days']}; средний интервал {money(row['mean_days_between_visits'])} дней")
-        lines.append(f"Следующая страница offset={result['next_offset']}. Давность — по наблюдаемой истории. Клиент продажи не доказывает использование бонусной карты. Баланс, начисления и списания пока НЕ ПОДТВЕРЖДЕНЫ; не равны нулю.")
+            row['frequency_group']=frequency(row)
+            if not export_all: lines.append(f"Клиент ID {row['customer_id']}: последняя покупка {row['last_purchase']}; дней {row['days_since_purchase']}; покупок {row['purchases']}; дней посещений {row['visit_days']}; средний интервал {money(row['mean_days_between_visits'])} дней")
+        lines.append(f"Следующая страница offset={result['next_offset']}. Давность — по наблюдаемой истории. По правилу владельца продажи без клиента не имеют карты. Наличие клиента само по себе не доказывает бонусную операцию. Этот список не рассчитывает баланс, начисления и списания; смотрите карточку клиента с покрытием бонусных ответов.")
     if result['last_sync']:
         lines.append('Последний sync: '+str(result['last_sync']['status'])+'; старт '+str(result['last_sync']['started_at'])+'; завершён '+str(result['last_sync']['finished_at']))
         if result['last_sync']['status']=='RUNNING': lines.append('RUNNING — статус в БД; работа процесса не подтверждена.')

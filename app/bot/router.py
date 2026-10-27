@@ -1613,18 +1613,108 @@ async def detail_summary(message: Message) -> None:
             start,end=parts[:2]
             parts=parts[2:]
         options={}
-        aliases={'point':'point_id','seller':'seller_id','shift':'shift','query':'query','min':'min_days','max':'max_days','offset':'offset'}
+        aliases={'point':'point_id','seller':'seller_id','shift':'shift','query':'query','min':'min_days','max':'max_days','offset':'offset','match':'match','frequency':'frequency_filter','csv':'csv'}
         for part in parts:
             key,sep,value=part.partition('=')
             if not sep or key not in aliases or aliases[key] in options: raise ValueError('Фильтры: point=ID seller=ID shift=DAY query="название" min=30 max=59 offset=0')
             options[aliases[key]]=int(value) if key in ('min','max','offset') else value
         kind={'avgcheck':'averages','itemqty':'quantities','modifiers':'modifiers','basket':'basket','trend':'trend','clients':'clients'}[command]
-        data=await report(kind,start,end,**options)
+        csv_export=options.pop('csv','false')
+        if csv_export not in ('true','false'): raise ValueError('csv=true или csv=false')
+        if csv_export=='true' and kind not in ('quantities','modifiers','clients'): raise ValueError('CSV: itemqty, modifiers, clients')
+        data=await report(kind,start,end,**options,export_all=csv_export=='true')
+        if csv_export=='true':
+            from aiogram.types import BufferedInputFile
+            from app.services.report_helpers import csv_bytes
+            rows=[{**r,'report_start':data.get('date_from'),'report_end':data.get('date_to'),'complete_source':False} for r in data.get('rows',[])]
+            content=csv_bytes(rows)
+            if len(content)>45*1024*1024: raise ValueError('CSV слишком большой; сузьте период или магазин')
+            await message.answer_document(BufferedInputFile(content,filename=f'{kind}.csv'),caption=f'Полный список: {len(rows)} строк. Локальные данные; полнота Saby не подтверждена.')
+            return
         for chunk in chunks(data['report_text']): await message.answer(chunk,parse_mode=None)
     except ValueError as exc:
         await message.answer(str(exc),parse_mode=None)
     except Exception:
         logger.exception('Detail report failed')
+        await message.answer('Не удалось получить отчёт. Проверьте журнал приложения.')
+
+
+@router.message(Command('itemcompare','client','saleaudit'))
+async def extra_report_command(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    import shlex
+    from app.services.extra_reports import product_comparison,customer_card,payment_audit
+    from app.services.management_reports import chunks
+    try:
+        parts=shlex.split(message.text or '')
+        command=parts.pop(0).split('@')[0].lstrip('/')
+        n=4 if command=='itemcompare' else 2
+        if len(parts)<n: raise ValueError('Формат: /itemcompare начало конец база_начало база_конец; /client ID дата; /saleaudit начало конец. Фильтры: point=ID query="название" match=exact offset=0 csv=true')
+        positional=parts[:n];opts={}
+        aliases={'point':'point_id','seller':'seller_id','shift':'shift','query':'query','match':'match','offset':'offset','modifiers':'modifiers','csv':'csv'}
+        for part in parts[n:]:
+            key,sep,value=part.partition('=')
+            if not sep or key not in aliases or aliases[key] in opts: raise ValueError('Неизвестный или повторный фильтр')
+            if key in ('modifiers','csv') and value not in ('true','false'): raise ValueError('Используйте true/false')
+            opts[aliases[key]]=int(value) if key=='offset' else value=='true' if key in ('csv','modifiers') else value
+        csv_export=opts.pop('csv',False)
+        allowed={'offset'} if command=='client' else {'point_id','offset'} if command=='saleaudit' else set(aliases.values())-{'csv'}
+        if set(opts)-allowed: raise ValueError('Фильтр не поддерживается этой командой')
+        if command=='client': data=await customer_card(*positional,**opts)
+        elif command=='saleaudit': data=await payment_audit(*positional,**opts)
+        else: data=await product_comparison(*positional,**opts)
+        if csv_export:
+            from aiogram.types import BufferedInputFile
+            from app.services.report_helpers import csv_bytes
+            content=csv_bytes([{**r,'report_parameters':' '.join(positional),'complete_source':False} for r in data['rows']])
+            if len(content)>45*1024*1024: raise ValueError('CSV слишком большой; сузьте выборку')
+            await message.answer_document(BufferedInputFile(content,filename=f'{command}.csv'),caption='Полный список. Локальные данные, полнота Saby не подтверждена.')
+        else:
+            for chunk in chunks(data['report_text']): await message.answer(chunk,parse_mode=None)
+    except ValueError as exc: await message.answer(str(exc),parse_mode=None)
+    except Exception:
+        logger.exception('Extra report failed')
+        await message.answer('Не удалось получить отчёт. Проверьте журнал приложения.')
+
+
+@router.message(Command('analytics'))
+async def advanced_report_command(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    import shlex
+    from app.services.advanced_reports import report,render
+    from app.services.management_reports import chunks
+    try:
+        parts=shlex.split(message.text or '')[1:]
+        if len(parts)<3:
+            raise ValueError('/analytics вид начало конец [point=ID] [previous_start=дата previous_end=дата] [offset=0] [min_pairs=3] [csv=true]')
+        options={}
+        for part in parts[3:]:
+            key,sep,value=part.partition('=')
+            if not sep or key not in ('point','previous_start','previous_end','offset','min_pairs','csv') or key in options:
+                raise ValueError('Неизвестный или повторный фильтр')
+            options[key]=value
+        csv=options.pop('csv','false')
+        if csv not in ('true','false'): raise ValueError('csv=true или csv=false')
+        if 'point' in options: options['point_id']=options.pop('point')
+        for key in ('offset','min_pairs'):
+            if key in options: options[key]=int(options[key])
+        result=await report(*parts[:3],**options,export_all=csv=='true')
+        if csv=='true':
+            from aiogram.types import BufferedInputFile
+            from app.services.report_helpers import csv_bytes
+            content=csv_bytes([{**r,'date_from':parts[1],'date_to':parts[2],
+                'complete_source':False,'basis':'unique_sale_total_price'} for r in result['rows']])
+            if len(content)>45*1024*1024: raise ValueError('CSV слишком большой; сузьте период')
+            await message.answer_document(BufferedInputFile(content,filename='analytics.csv'),caption='Локальные данные, полнота не подтверждена. Суммы продаж, не платёжная выручка.')
+        else:
+            for chunk in chunks(render(result)): await message.answer(chunk,parse_mode=None)
+    except ValueError as exc: await message.answer(str(exc),parse_mode=None)
+    except Exception:
+        logger.exception('Advanced report failed')
         await message.answer('Не удалось получить отчёт. Проверьте журнал приложения.')
 
 

@@ -277,6 +277,19 @@ async def get_price(point, price_id):
 
 
 async def download_image(reference):
+    # Retry only this image. Never refetch its price list on an image failure.
+    for attempt in range(3):
+        try:
+            return await _download_image_once(reference)
+        except (httpx.TimeoutException,httpx.TransportError):
+            if attempt==2: raise ExportError('SABY_IMAGE_NETWORK_ERROR') from None
+        except ExportError as exc:
+            if exc.code not in {'SABY_IMAGE_UPSTREAM_ERROR','SABY_IMAGE_UNAVAILABLE'} or attempt==2:
+                raise
+        await asyncio.sleep(2**(attempt+1))
+
+
+async def _download_image_once(reference):
     locator = decode_image(reference)
     cached = _image_cache.get(locator)
     headers = {}
@@ -296,6 +309,12 @@ async def download_image(reference):
                         continue
                     if response.status_code == 304 and cached and headers:
                         return cached[:3]
+                    if response.status_code==429:
+                        raise ExportError('SABY_IMAGE_RATE_LIMITED',429)
+                    if response.status_code in (500,502,503,504):
+                        raise ExportError('SABY_IMAGE_UPSTREAM_ERROR')
+                    if response.status_code==404:
+                        raise ExportError('SABY_IMAGE_NOT_FOUND',404)
                     if response.status_code != 200:
                         raise ExportError("SABY_IMAGE_UNAVAILABLE")
                     mime = response.headers.get("content-type", "").split(";")[0].lower()

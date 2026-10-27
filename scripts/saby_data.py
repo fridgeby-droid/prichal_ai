@@ -9,10 +9,14 @@ from app.services.saby_maintenance import check,update
 
 
 async def run(args):
-    await init_db()
+    stage='database_connect' if args.action=='check' else 'database_prepare'
     try:
+        await init_db(prepare_schema=args.action!='check')
+        stage='saby_'+args.action
         if args.action=='check': return await check()
         return await update(args.start,args.end,args.all_history,args.action=='resume')
+    except TimeoutError:
+        return {'status':'ERROR','error_type':'TimeoutError','stage':stage}
     finally: await close_db()
 
 

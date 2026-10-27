@@ -28,6 +28,15 @@ def failed(code, status):
                         status_code=status, headers={"Cache-Control": "no-store"})
 
 
+def image_failed(code,status):
+    retryable=code in {'SABY_IMAGE_UPSTREAM_ERROR','SABY_IMAGE_UNAVAILABLE','SABY_IMAGE_NETWORK_ERROR','SABY_IMAGE_TIMEOUT','SABY_IMAGE_RATE_LIMITED'}
+    headers={'Cache-Control':'no-store'}
+    if retryable: headers['Retry-After']='120' if status==429 else '30'
+    return JSONResponse({'schema_version':1,'complete_snapshot':False,
+        'error':{'code':code,'retryable':retryable,'retry_scope':'image',
+                 'refetch_price_list':False}},status_code=status,headers=headers)
+
+
 async def export(call):
     try:
         async with asyncio.timeout(max(1, get_settings().price_lists_timeout_seconds)):
@@ -66,8 +75,8 @@ async def image(reference: str, if_none_match: str | None = Header(default=None)
             return Response(status_code=304, headers=headers)
         return Response(raw, media_type=mime, headers=headers)
     except service.ExportError as exc:
-        return failed(exc.code, exc.status)
+        return image_failed(exc.code, exc.status)
     except TimeoutError:
-        return failed("SABY_IMAGE_TIMEOUT", 504)
+        return image_failed("SABY_IMAGE_TIMEOUT", 504)
     except Exception:
-        return failed("SABY_IMAGE_UNAVAILABLE", 502)
+        return image_failed("SABY_IMAGE_UNAVAILABLE", 502)
