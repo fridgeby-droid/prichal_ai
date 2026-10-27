@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.38"
-BUILD_TAG = "business-analytics-traffic-ready"
+APP_VERSION = "0.3.39"
+BUILD_TAG = "adaptive-bonus-pacing"

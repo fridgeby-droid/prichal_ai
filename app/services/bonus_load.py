@@ -7,6 +7,7 @@ from app.db.database import pool
 from app.services.saby import saby_client
 from app.services.bonus_probe import candidate_key, describe
 from app.services.order_transport import cooldown
+from app.services.bonus_pacing import BonusPacer,current_pacer
 
 LOCK = 731031
 QUEUE_ORDER = '''CASE WHEN b.point_id IS NULL THEN 0
@@ -33,22 +34,25 @@ def normalize(body):
 
 
 async def read_bonus(key):
+    pacer=current_pacer.get()
     for attempt in range(4):
         try:
             return normalize(await saby_client._get(f'/retail/order/{key}/bonus-read', {}))
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
             limited, seconds = cooldown(exc.response)
+            if pacer: pacer.failure(limited)
             if limited and attempt == 3:
                 raise ValueError('RETRY_LATER') from None
             if status not in (429,500,502,503,504) or attempt == 3:
                 raise ValueError(f'HTTP_{status}') from None
             _, seconds = cooldown(exc.response)
             if seconds is None or seconds > 600: raise ValueError('RETRY_LATER') from None
-            await asyncio.sleep(max(3, 2**(attempt+1), seconds+1))
+            await asyncio.sleep(max(pacer.delay if pacer else 3, 2**(attempt+1), seconds+1))
         except (httpx.TimeoutException,httpx.TransportError):
+            if pacer: pacer.failure()
             if attempt == 3: raise ValueError('NETWORK_ERROR') from None
-            await asyncio.sleep(2**(attempt+1))
+            await asyncio.sleep(max(pacer.delay if pacer else 3,2**(attempt+1)))
 
 
 async def load(start=None, end=None, point=None, limit=100, refresh=False):
@@ -60,7 +64,17 @@ async def load(start=None, end=None, point=None, limit=100, refresh=False):
         counts = {'saved':0,'unsupported':0,'errors':0}
         failed_keys = []
         consecutive_errors = 0
+        pacer=BonusPacer()
+        token=current_pacer.set(pacer)
         try:
+            initial_pending=await conn.fetchval('''SELECT COUNT(*) FROM retail_sales s
+                LEFT JOIN bonus_observations b USING(point_id,sale_id)
+                WHERE NOT s.deleted AND s.customer_id IS NOT NULL
+                AND ($1::date IS NULL OR s.business_date >= $1)
+                AND ($2::date IS NULL OR s.business_date <= $2)
+                AND ($3::bigint IS NULL OR s.point_id=$3)
+                AND (b.point_id IS NULL OR b.status='ERROR' OR $4)''',start,end,point,refresh)
+            print('Bonus pacing: starts at 3s; floor 2s; 50 clean successes per 0.25s step; sequential requests',flush=True)
             while True:
                 rows = await conn.fetch('''SELECT s.point_id,s.sale_id,s.raw_json,
                     md5(s.raw_json::text) fingerprint FROM retail_sales s
@@ -83,10 +97,12 @@ async def load(start=None, end=None, point=None, limit=100, refresh=False):
                 error = None
                 status = 'UNSUPPORTED'
                 if key:
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(pacer.delay)
+                    failures_before=pacer.failures
                     try:
                         data = await read_bonus(key)
                         status = 'OK'
+                        if pacer.failures==failures_before: pacer.success()
                     except Exception as exc:
                         # Only controlled codes; never persist URLs, tokens or upstream text.
                         error = str(exc) if isinstance(exc,ValueError) and str(exc) in {
@@ -96,6 +112,7 @@ async def load(start=None, end=None, point=None, limit=100, refresh=False):
                         if isinstance(exc,ValueError) and str(exc).startswith('HTTP_'):
                             error = str(exc)
                         status = ('UNSUPPORTED' if error == 'ACTION_MISSING_OR_UNSUPPORTED' else 'ERROR')
+                        if pacer.failures==failures_before: pacer.failure()
                 await conn.execute('''INSERT INTO bonus_observations
                     (point_id,sale_id,fingerprint,status,response,attempted_at,error_code)
                     VALUES($1,$2,$3,$4,$5::jsonb,now(),$6)
@@ -112,18 +129,19 @@ async def load(start=None, end=None, point=None, limit=100, refresh=False):
                     consecutive_errors += 1
                     print(f"Bonus deferred: point={row['point_id']} sale={row['sale_id']} code={error}",flush=True)
                     if error in {'HTTP_401','HTTP_403','HTTP_429','RETRY_LATER'} or consecutive_errors >= 5:
-                        return {**counts,'status':'STOPPED','error':error,
+                        return {**counts,**pacer.metrics(counts,initial_pending,refresh),'status':'STOPPED','error':error,
                                 'reason':'GLOBAL_OR_REPEATED_FAILURE','complete_history':False,
                                 'next':'Повторите команду позже: сохранённые ответы пропускаются.'}
                 else:
                     consecutive_errors = 0
                 if sum(counts.values()) % 25 == 0:
-                    print(f'Bonus loading: {sum(counts.values())} processed; saved={counts["saved"]}',flush=True)
+                    print(json.dumps({'event':'bonus_progress',**counts,**pacer.metrics(counts,initial_pending,refresh)},ensure_ascii=False),flush=True)
                 if limit and sum(counts.values()) >= limit:
-                    return {**counts,'status':'PARTIAL_ERRORS' if counts['errors'] else 'BATCH_FINISHED','complete_history':False}
-            return {**counts,'status':'PARTIAL_ERRORS' if counts['errors'] else 'LOCAL_SALES_PROCESSED',
+                    return {**counts,**pacer.metrics(counts,initial_pending,refresh),'status':'PARTIAL_ERRORS' if counts['errors'] else 'BATCH_FINISHED','complete_history':False}
+            return {**counts,**pacer.metrics(counts,initial_pending,refresh),'status':'PARTIAL_ERRORS' if counts['errors'] else 'LOCAL_SALES_PROCESSED',
                     'complete_history':False}
         finally:
+            current_pacer.reset(token)
             await conn.execute('SELECT pg_advisory_unlock($1)', LOCK)
 
 
@@ -159,7 +177,10 @@ async def plan(start=None, end=None, point=None):
               AND ($2::date IS NULL OR s.business_date <= $2)
               AND ($3::bigint IS NULL OR s.point_id=$3)
             ORDER BY b.attempted_at DESC LIMIT 10''',start,end,point)]
-    return {**counts,'minimum_wait_hours':round(counts['pending_requests']*3/3600,2),
+    return {**counts,'minimum_wait_hours':round(counts['pending_requests']*2/3600,2),
+        'wait_hours_at_initial_3s':round(counts['pending_requests']*3/3600,2),
+        'pacing':'ADAPTIVE_3_TO_2_SECONDS_BACKOFF_UP_TO_10',
+        'timing_note':'Нижняя оценка — только паузы при 2с; текущую скорость и ETA смотрите в bonus_progress работающего загрузчика.',
         'changed_saved':None,'freshness_checked':False,'uuid_validation_performed':False,
         'queue_order':'NEW_FIRST_THEN_OLDEST_ERRORS','saby_requests_made':0,'recent_errors':errors,
         'note':'Лёгкий подсчёт по локальным полям. Контрольные суммы и UUID не проверялись; pending_requests — оценка по наличию ключа. Это не полнота Saby.',
