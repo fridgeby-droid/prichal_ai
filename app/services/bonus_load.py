@@ -7,7 +7,7 @@ from app.db.database import pool
 from app.services.saby import saby_client
 from app.services.bonus_probe import candidate_key, describe
 from app.services.order_transport import cooldown
-from app.services.bonus_pacing import BonusPacer,current_pacer
+from app.services.bonus_pacing import BonusPacer,current_pacer,MIN_DELAY,INITIAL_DELAY
 
 LOCK = 731031
 QUEUE_ORDER = '''CASE WHEN b.point_id IS NULL THEN 0
@@ -36,6 +36,7 @@ def normalize(body):
 async def read_bonus(key):
     pacer=current_pacer.get()
     for attempt in range(4):
+        if pacer: await pacer.before_request()
         try:
             return normalize(await saby_client._get(f'/retail/order/{key}/bonus-read', {}))
         except httpx.HTTPStatusError as exc:
@@ -74,7 +75,7 @@ async def load(start=None, end=None, point=None, limit=100, refresh=False):
                 AND ($2::date IS NULL OR s.business_date <= $2)
                 AND ($3::bigint IS NULL OR s.point_id=$3)
                 AND (b.point_id IS NULL OR b.status='ERROR' OR $4)''',start,end,point,refresh)
-            print('Bonus pacing: starts at 3s; floor 2s; 50 clean successes per 0.25s step; sequential requests',flush=True)
+            print(f'Bonus pacing: START_TO_START; initial interval {INITIAL_DELAY:g}s; floor {MIN_DELAY:g}s; 50 clean successes per 0.25s step; sequential requests',flush=True)
             while True:
                 rows = await conn.fetch('''SELECT s.point_id,s.sale_id,s.raw_json,
                     md5(s.raw_json::text) fingerprint FROM retail_sales s
@@ -97,7 +98,6 @@ async def load(start=None, end=None, point=None, limit=100, refresh=False):
                 error = None
                 status = 'UNSUPPORTED'
                 if key:
-                    await asyncio.sleep(pacer.delay)
                     failures_before=pacer.failures
                     try:
                         data = await read_bonus(key)
@@ -177,10 +177,11 @@ async def plan(start=None, end=None, point=None):
               AND ($2::date IS NULL OR s.business_date <= $2)
               AND ($3::bigint IS NULL OR s.point_id=$3)
             ORDER BY b.attempted_at DESC LIMIT 10''',start,end,point)]
-    return {**counts,'minimum_wait_hours':round(counts['pending_requests']*2/3600,2),
-        'wait_hours_at_initial_3s':round(counts['pending_requests']*3/3600,2),
-        'pacing':'ADAPTIVE_3_TO_2_SECONDS_BACKOFF_UP_TO_10',
-        'timing_note':'Нижняя оценка — только паузы при 2с; текущую скорость и ETA смотрите в bonus_progress работающего загрузчика.',
+    return {**counts,'minimum_wait_hours':None,
+        'minimum_spacing_hours':round(max(0,counts['pending_requests']-1)*MIN_DELAY/3600,2),
+        'pacing':'START_TO_START_ADAPTIVE_3_TO_1_5_SECONDS',
+        'minimum_pause_seconds':MIN_DELAY,
+        'timing_note':f'Интервал между началами запросов от {MIN_DELAY:g}с включает время ответа и БД; дополнительное ожидание может быть нулевым. minimum_spacing_hours — теоретический предел интервалов, не ETA. Фактическая скорость в bonus_progress.',
         'changed_saved':None,'freshness_checked':False,'uuid_validation_performed':False,
         'queue_order':'NEW_FIRST_THEN_OLDEST_ERRORS','saby_requests_made':0,'recent_errors':errors,
         'note':'Лёгкий подсчёт по локальным полям. Контрольные суммы и UUID не проверялись; pending_requests — оценка по наличию ключа. Это не полнота Saby.',
