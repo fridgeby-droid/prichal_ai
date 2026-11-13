@@ -24,8 +24,13 @@ def terminal(state):
         state.get('status')=='ERROR' and state.get('error_code')=='BONUS_LOAD_INCOMPLETE')
 
 
-def state_key(component):
+def state_key(component, automatic=False):
+    if automatic: return f'maintenance:saby:auto:{component}:v1'
     return KEY if component is None else f'maintenance:saby:component:{component}:v1'
+
+
+class StageBudgetReached(Exception):
+    pass
 
 
 def decode(value):
@@ -75,6 +80,7 @@ async def check():
             FROM app_meta WHERE key LIKE 'maintenance:price:%' ORDER BY key''')
         coverage=await conn.fetch('SELECT date_from,date_to,next_date FROM backfill_runs')
         components=await conn.fetch("SELECT key,value FROM app_meta WHERE key LIKE 'maintenance:saby:component:%' ORDER BY key")
+        automatic=await conn.fetch("SELECT key,value FROM app_meta WHERE key LIKE 'maintenance:saby:auto:%' OR key='maintenance:saby:scheduler:v1' ORDER BY key")
         locks=await conn.fetch('''SELECT pid,granted FROM pg_locks
             WHERE locktype='advisory' AND classid=0 AND objid=$1 AND objsubid=1''',LOCK)
     windows=missing_ranges(sales['date_from'],closed_day(),coverage) if sales['date_from'] else []
@@ -94,6 +100,7 @@ async def check():
             'catalog':{k:catalog.get(k) for k in ('fetched_at','complete_snapshot','revision')} if catalog else None,
             'prices':[dict(r) for r in prices],'maintenance':state,
             'component_updates':{r['key']:decode(r['value']) for r in components},
+            'automatic_updates':{r['key']:decode(r['value']) for r in automatic},
             'maintenance_lock_sessions':[dict(r) for r in locks],
             'bonuses':bonuses,
             'source_complete':False,
@@ -101,12 +108,14 @@ async def check():
                    'Проверка не обращается к Saby; картинки хранятся в Core по отдельному контракту.'}
 
 
-async def update(start=None,end=None,all_history=False,resume=False,component=None):
+async def update(start=None,end=None,all_history=False,resume=False,component=None,
+                 automatic=False,max_stages=None):
     if component is not None and component not in COMPONENTS:
         raise ValueError('INVALID_COMPONENT')
-    key=state_key(component)
+    if automatic and component not in ('stores','catalog','prices'): raise ValueError('INVALID_COMPONENT')
+    key=state_key(component,automatic)
     settings=get_settings()
-    if settings.auto_sync_enabled or settings.auto_sync_on_start:
+    if not automatic and (settings.auto_sync_enabled or settings.auto_sync_on_start):
         raise ValueError('DISABLE_AUTO_SYNC_FOR_MAINTENANCE')
     async with pool().acquire() as lock_conn:
         if not await lock_conn.fetchval('SELECT pg_try_advisory_lock($1)',LOCK):
@@ -139,12 +148,15 @@ async def update(start=None,end=None,all_history=False,resume=False,component=No
             state.pop('error_type',None)
             state.pop('error_code',None)
             state.pop('next',None)
+            stages_run=0
             async def stage(name,fn):
+                nonlocal stages_run
                 group=('sales' if name in ('sales_payments_items_shifts_reconcile','seller_identities')
                        else 'prices' if name.startswith(('price:','price_list:'))
                        else 'bonuses' if name=='bonuses_all_local_customer_sales' else name)
                 if component and group!=component: return
                 if name in state['done']: return
+                if max_stages is not None and stages_run>=max_stages: raise StageBudgetReached()
                 state['current_stage']=name
                 state['updated_at']=datetime.now().astimezone().isoformat()
                 await save(key,state)
@@ -152,6 +164,7 @@ async def update(start=None,end=None,all_history=False,resume=False,component=No
                 async with keep_lock_alive(lock_conn):
                     await fn()
                 state['done'].append(name)
+                stages_run+=1
                 state['updated_at']=datetime.now().astimezone().isoformat()
                 await save(key,state)
             async def sales():
@@ -170,7 +183,7 @@ async def update(start=None,end=None,all_history=False,resume=False,component=No
             async def bonuses():
                 state.pop('bonus_result',None)
                 await save(key,state)
-                result=await bonus_load.load(limit=0)
+                result=await bonus_load.load(limit=0,coordinated=True)
                 state['bonus_result']=result
                 if result['status'] in ('STOPPED','PARTIAL_ERRORS'): raise ValueError('BONUS_LOAD_INCOMPLETE')
             try:
@@ -195,6 +208,12 @@ async def update(start=None,end=None,all_history=False,resume=False,component=No
                         await stage(f'price:{point}:{price_id}',contents)
                 # Longest stage last, durable per-sale cache shared with bonuses CLI.
                 await stage('bonuses_all_local_customer_sales',bonuses)
+            except StageBudgetReached:
+                state['status']='PENDING'
+                state['current_stage']=None
+                state['updated_at']=datetime.now().astimezone().isoformat()
+                await save(key,state)
+                return state
             except Exception as exc:
                 state['status']='PARTIAL' if str(exc)=='BONUS_LOAD_INCOMPLETE' else 'ERROR'
                 state.update(error_details(exc))

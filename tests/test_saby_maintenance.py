@@ -42,7 +42,7 @@ def test_resume_skips_successful_stages_and_reuses_backfill(monkeypatch):
     assert resumed['status']=='COMPLETED'
     assert mocks['sync_stores'].await_count==1
     assert mocks['create_run'].await_count==1 and mocks['run'].await_count==1
-    assert mocks['load'].await_args.kwargs=={'limit':0}
+    assert mocks['load'].await_args.kwargs=={'limit':0,'coordinated':True}
 
 
 def test_reconcile_failure_does_not_reach_catalog_or_bonuses(monkeypatch):

@@ -1,6 +1,7 @@
 """Resumable order-level observations, never an inferred loyalty ledger."""
 import asyncio
 import json
+import time
 from datetime import datetime, timezone
 import httpx
 from app.db.database import pool
@@ -8,6 +9,7 @@ from app.services.saby import saby_client
 from app.services.bonus_probe import candidate_key, describe
 from app.services.order_transport import cooldown
 from app.services.bonus_pacing import BonusPacer,current_pacer,MIN_DELAY,INITIAL_DELAY
+from app.services.lock_guard import keep_lock_alive,release_lock
 
 LOCK = 731031
 QUEUE_ORDER = '''CASE WHEN b.point_id IS NULL THEN 0
@@ -56,8 +58,31 @@ async def read_bonus(key):
             await asyncio.sleep(max(pacer.delay if pacer else 3,2**(attempt+1)))
 
 
-async def load(start=None, end=None, point=None, limit=100, refresh=False):
+async def load(start=None, end=None, point=None, limit=100, refresh=False,
+               queue_mode='all', max_seconds=None, coordinated=False):
+    args=(start,end,point,limit,refresh,queue_mode,max_seconds)
+    if coordinated:
+        return await _load(*args)
+    # Same gate as automatic/manual maintenance. The caller already holding it
+    # uses coordinated=True; standalone bonuses CLI must acquire it itself.
+    async with pool().acquire() as conn:
+        if not await conn.fetchval('SELECT pg_try_advisory_lock($1)',731033):
+            raise ValueError('MAINTENANCE_ALREADY_RUNNING')
+        try:
+            async with keep_lock_alive(conn):
+                return await _load(*args)
+        finally:
+            await release_lock(conn,'SELECT pg_advisory_unlock($1)',731033)
+
+
+async def _load(start=None,end=None,point=None,limit=100,refresh=False,
+                queue_mode='all',max_seconds=None):
     """Each sale commits separately. Global DB lock prevents competing loaders."""
+    filters={'all':'', 'new':' AND b.point_id IS NULL ',
+             'errors':" AND b.status='ERROR' AND b.attempted_at < now() - INTERVAL '24 hours' "}
+    if queue_mode not in filters: raise ValueError('INVALID_BONUS_QUEUE')
+    queue_filter=filters[queue_mode]
+    deadline=time.monotonic()+max_seconds if max_seconds is not None else None
     async with pool().acquire() as conn:
         if not await conn.fetchval('SELECT pg_try_advisory_lock($1)', LOCK):
             raise ValueError('BONUS_LOADER_ALREADY_RUNNING')
@@ -74,9 +99,12 @@ async def load(start=None, end=None, point=None, limit=100, refresh=False):
                 AND ($1::date IS NULL OR s.business_date >= $1)
                 AND ($2::date IS NULL OR s.business_date <= $2)
                 AND ($3::bigint IS NULL OR s.point_id=$3)
-                AND (b.point_id IS NULL OR b.status='ERROR' OR $4)''',start,end,point,refresh)
+                AND (b.point_id IS NULL OR b.status='ERROR' OR $4)''' + queue_filter,start,end,point,refresh)
             print(f'Bonus pacing: START_TO_START; initial interval {INITIAL_DELAY:g}s; floor {MIN_DELAY:g}s; 50 clean successes per 0.25s step; sequential requests',flush=True)
             while True:
+                if deadline is not None and time.monotonic()>=deadline:
+                    return {**counts,'status':'PARTIAL_ERRORS' if counts['errors'] else 'BATCH_FINISHED',
+                            'complete_history':False,'reason':'TIME_BUDGET'}
                 rows = await conn.fetch('''SELECT s.point_id,s.sale_id,s.raw_json,
                     md5(s.raw_json::text) fingerprint FROM retail_sales s
                     LEFT JOIN bonus_observations b USING(point_id,sale_id)
@@ -87,7 +115,7 @@ async def load(start=None, end=None, point=None, limit=100, refresh=False):
                     AND NOT ((s.point_id::text || ':' || s.sale_id::text)=ANY($6::text[]))
                     AND (b.point_id IS NULL
                       OR b.status='ERROR' OR ($4 AND b.attempted_at<$5))
-                    ORDER BY ''' + QUEUE_ORDER + ''' LIMIT 1''',
+                    ''' + queue_filter + ' ORDER BY ' + QUEUE_ORDER + ''' LIMIT 1''',
                     start,end,point,refresh,started,failed_keys)
                 if not rows: break
                 row = rows[0]
@@ -142,7 +170,7 @@ async def load(start=None, end=None, point=None, limit=100, refresh=False):
                     'complete_history':False}
         finally:
             current_pacer.reset(token)
-            await conn.execute('SELECT pg_advisory_unlock($1)', LOCK)
+            await release_lock(conn,'SELECT pg_advisory_unlock($1)', LOCK)
 
 
 async def plan(start=None, end=None, point=None):

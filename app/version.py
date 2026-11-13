@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.42"
-BUILD_TAG = "independent-source-updates"
+APP_VERSION = "0.3.43"
+BUILD_TAG = "automatic-source-updates"

@@ -14,6 +14,7 @@ from app.price_lists_api import router as price_lists_api_router
 from app.services.core_schedule import schedule_loop
 from app.db.database import close_db, health as db_health, init_db
 from app.services.sync import sync_service
+from app.services.auto_sources import run_loop
 from app.services.storage import storage
 from app.version import APP_VERSION, BUILD_TAG
 
@@ -32,28 +33,7 @@ dp.include_router(router)
 
 
 async def auto_sync_loop() -> None:
-    first = True
-
-    while True:
-        try:
-            if (
-                settings.auto_sync_enabled
-                and (settings.auto_sync_on_start or not first)
-            ):
-                logger.info(
-                    "Starting auto sync for recent %s days",
-                    settings.sync_recent_days,
-                )
-                result = await sync_service.sync_recent(settings.sync_recent_days)
-                logger.info("Auto sync completed: %s", result)
-
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Auto sync failed")
-
-        first = False
-        await asyncio.sleep(max(5, settings.sync_interval_minutes) * 60)
+    await run_loop()
 
 
 @asynccontextmanager

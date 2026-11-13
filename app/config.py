@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     auto_sync_on_start: bool = False
     sync_interval_minutes: int = 60
     sync_recent_days: int = 3
+    auto_sources_enabled: bool = False
+    auto_bonus_batch_size: int = 50
+    auto_bonus_interval_minutes: int = 10
+    auto_source_interval_hours: int = 24
     max_manual_sync_days: int = 60
     sync_concurrency: int = 4
     backfill_chunk_days: int = 7
