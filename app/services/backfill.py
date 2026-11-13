@@ -11,6 +11,7 @@ from app.config import get_settings
 from app.db.database import pool
 from app.services.sync import sync_service
 from app.services.analytics import analytics_service
+from app.services.lock_guard import keep_lock_alive, release_lock
 
 
 logger = logging.getLogger(__name__)
@@ -159,9 +160,10 @@ class BackfillService:
             if not acquired:
                 raise ValueError("Другой backfill уже выполняется. Дождитесь его завершения.")
             try:
-                return await self._run(run_id, progress_callback)
+                async with keep_lock_alive(lock_conn):
+                    return await self._run(run_id, progress_callback)
             finally:
-                await lock_conn.execute("SELECT pg_advisory_unlock(hashtext($1))", lock_key)
+                await release_lock(lock_conn, "SELECT pg_advisory_unlock(hashtext($1))", lock_key)
 
     async def _run(
         self,

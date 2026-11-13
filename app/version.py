@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.41"
-BUILD_TAG = "bonus-start-interval"
+APP_VERSION = "0.3.42"
+BUILD_TAG = "independent-source-updates"

@@ -168,7 +168,8 @@ def test_before_eight_yesterday_is_still_open(monkeypatch):
 def test_web_and_cli_import_without_starting_services():
     from app.web import app
     from scripts.bootstrap import main
-    assert app.version == "0.3.41"
+    from app.version import APP_VERSION
+    assert app.version == APP_VERSION
     assert callable(main)
 
 
