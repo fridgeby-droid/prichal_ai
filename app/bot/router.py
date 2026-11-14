@@ -1932,3 +1932,12 @@ async def ai_text(message: Message, request_text: str = '') -> None:
             "⚠️ Запрос не выполнен.\n\n"
             'Повторите запрос позже. Подробности сохранены в журнале.'
         )
+
+
+@router.message(F.voice)
+async def ai_voice(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    from app.services.voice import handle_voice
+    await handle_voice(message, settings, ai_text)

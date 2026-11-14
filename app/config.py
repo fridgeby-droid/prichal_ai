@@ -1,5 +1,5 @@
 from functools import lru_cache
-from pydantic import SecretStr
+from pydantic import SecretStr, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,6 +9,9 @@ class Settings(BaseSettings):
 
     openai_api_key: str
     openai_default_model: str = "gpt-5.6-luna"
+    voice_enabled: bool = True
+    voice_transcription_model: str = "gpt-transcribe"
+    voice_max_duration_seconds: int = Field(default=120, ge=1, le=120)
 
     saby_app_client_id: str
     saby_app_secret: str

@@ -1,5 +1,6 @@
 """Read-only, documented Saby endpoints. No document execution or attachment downloads."""
 import asyncio
+import json
 from datetime import date, datetime, timezone
 from app.services.saby import saby_client, API_BASE, _response_shape
 from app.services.sale_tree import numeric
@@ -16,8 +17,10 @@ async def request(path, params=None, method=None):
     token = await saby_client._authenticate()
     headers = {'X-SBISAccessToken': token, 'User-Agent': 'PrichalAI inventory read-only'}
     if method:
+        headers['Content-Type']='application/json-rpc;charset=utf-8'
+        payload={'jsonrpc':'2.0','id':1,'method':method,'params':params}
         response = await saby_client._request('POST', DOC_URL, headers=headers,
-            json={'jsonrpc':'2.0','id':1,'method':method,'params':params})
+            content=json.dumps(payload,ensure_ascii=False,separators=(',',':'),allow_nan=False).encode('utf-8'))
     else:
         response = await saby_client._request('GET', API_BASE+path, headers=headers, params=params or {})
     response.raise_for_status()

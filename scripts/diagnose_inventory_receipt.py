@@ -11,8 +11,133 @@ import argparse
 import asyncio
 import json
 import re
+import hashlib
+import logging
+from urllib.parse import urlsplit, urljoin
+from xml.etree import ElementTree as ET
 import httpx
 from app.services import inventory_sources as source
+
+MAX_XML_BYTES=8*1024*1024
+
+
+class ProbeError(ValueError):
+    pass
+
+
+def checked_attachment_url(value):
+    if not isinstance(value,str) or len(value)>12000 or any(ord(c)<33 for c in value) or '\\' in value:
+        raise ProbeError('ATTACHMENT_URL_INVALID')
+    try:
+        url=urlsplit(value);host=(url.hostname or '').lower();port=url.port
+    except ValueError:
+        raise ProbeError('ATTACHMENT_URL_INVALID') from None
+    if (url.scheme!='https' or url.username or url.password or url.fragment or port not in (None,443)
+        or not any(host==domain or host.endswith('.'+domain) for domain in ('sbis.ru','saby.ru'))):
+        raise ProbeError('ATTACHMENT_HOST_NOT_ALLOWED')
+    return value
+
+
+async def download_xml(reference):
+    """Bounded read of a fresh Saby attachment link; never forward auth on redirects."""
+    url=checked_attachment_url(reference)
+    auth_hosts={'online.sbis.ru','online.saby.ru','api.sbis.ru','api.saby.ru'}
+    used_auth=False;headers={}
+    # Signed URLs and tokens must not reach httpx/httpcore logs.
+    loggers=[logging.getLogger(n) for n in ('httpx','httpcore')]
+    states=[log.disabled for log in loggers]
+    for log in loggers:log.disabled=True
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60,connect=20),follow_redirects=False) as client:
+            for attempt in range(6):
+                async with client.stream('GET',url,headers=headers) as response:
+                    if response.status_code in (301,302,303,307,308):
+                        url=checked_attachment_url(urljoin(url,response.headers.get('location','')))
+                        headers={}  # Authentication never follows a redirect.
+                        continue
+                    if response.status_code in (401,403) and not headers and not used_auth and urlsplit(url).hostname in auth_hosts:
+                        headers={'X-SBISAccessToken':await source.saby_client._authenticate()}
+                        used_auth=True
+                        continue
+                    if not response.is_success:raise ProbeError('ATTACHMENT_HTTP_'+str(response.status_code))
+                    length=response.headers.get('content-length','')
+                    if length.isdigit() and int(length)>MAX_XML_BYTES:raise ProbeError('ATTACHMENT_TOO_LARGE')
+                    body=bytearray()
+                    async for chunk in response.aiter_bytes():
+                        body.extend(chunk)
+                        if len(body)>MAX_XML_BYTES:raise ProbeError('ATTACHMENT_TOO_LARGE')
+                    return bytes(body),{'bytes':len(body),'sha256':hashlib.sha256(body).hexdigest(),
+                        'authenticated_download':used_auth}
+            raise ProbeError('ATTACHMENT_REDIRECT_LIMIT')
+    finally:
+        for log,state in zip(loggers,states):log.disabled=state
+
+
+class BoundedXML(ET.TreeBuilder):
+    def __init__(self):super().__init__();self.depth=0;self.count=0
+    def start(self,tag,attrs):
+        self.depth+=1;self.count+=1
+        if self.depth>50 or self.count>100000:raise ProbeError('XML_STRUCTURE_LIMIT')
+        return super().start(tag,attrs)
+    def end(self,tag):
+        result=super().end(tag);self.depth-=1;return result
+    def doctype(self,*args):raise ProbeError('XML_DTD_FORBIDDEN')
+
+
+def xml_summary(body):
+    if not body or len(body)>MAX_XML_BYTES:raise ProbeError('XML_SIZE_INVALID')
+    if body.startswith(b'PK'):raise ProbeError('XML_ZIP_UNSUPPORTED')
+    try:
+        root=ET.fromstring(body,parser=ET.XMLParser(target=BoundedXML()))
+    except ProbeError:raise
+    except (ET.ParseError,LookupError,ValueError):raise ProbeError('XML_PARSE_ERROR') from None
+    def local(name):return name.rsplit('}',1)[-1][:100]
+    shape={};warehouse=[];products=[];product_count=0
+    numeric_fields={'НомСтр','КолТов','ЦенаТов','СтТовБезНДС','СтТовУчНал','ОКЕИ_Тов'}
+    identity_fields={'КодТов','АртикулТов','Номенклатура','Nomenclature','NomenclatureUUID'}
+    def walk(node,path=''):
+        nonlocal product_count
+        tag=local(node.tag);path=path+'/'+tag
+        attrs={local(k):v for k,v in node.attrib.items()}
+        if path in shape or len(shape)<150:
+            row=shape.setdefault(path,{'path':path,'count':0,'attributes':set()})
+            row['count']+=1;row['attributes'].update(attrs)
+        clue=lambda text:'склад' in text.casefold() or 'warehouse' in text.casefold()
+        marked=clue(tag) or any(clue(k) or clue(v) for k,v in attrs.items())
+        if marked and len(warehouse)<20:
+            # Only fields explicitly labelled as warehouse, not surrounding addresses/contacts.
+            values={k:v[:160] for k,v in attrs.items() if clue(k)}
+            labels={k:v[:160] for k,v in attrs.items() if clue(v)}
+            if clue(tag):values.update({k:v[:160] for k,v in attrs.items() if k in ('Идентификатор','Код','Название','Наименование','id','name')})
+            if labels:values.update({k:v[:160] for k,v in attrs.items() if k in ('Значение','Значен','ТекстИнф','value')})
+            warehouse.append({'path':path,'fields':values,'labels':labels,
+                'text':(node.text or '').strip()[:160] if clue(tag) else None})
+        if tag in ('СведТов','Товар','Позиция','Номенклатура'):
+            product_count+=1
+            if len(products)<5:
+                safe={k:v for k,v in attrs.items() if k in numeric_fields and re.fullmatch(r'-?\d{1,20}(?:[.,]\d{1,10})?',v)}
+                safe.update({k:v[:160] for k,v in attrs.items() if k in identity_fields or k=='НаимТов'})
+                products.append({'path':path,'fields':safe,'attribute_names':sorted(attrs)})
+        for child in node:walk(child,path)
+    walk(root)
+    return {'root':local(root.tag),'schema_paths':[{**r,'attributes':sorted(r['attributes'])} for r in shape.values()],
+        'schema_paths_limit':150,'warehouse_clues':warehouse,'product_node_candidates':product_count,
+        'product_examples':products,'stable_saby_product_ids_confirmed':False,'warehouse_mapping_confirmed':False,
+        'note':'Структура XML и примеры полей, не импорт движений. Код товара поставщика не считается ID номенклатуры Saby. Отсутствие подсказки склада не доказывает отсутствие реквизита в другом источнике.'}
+
+
+async def inspect_accounting_xml(doc):
+    values=doc.get('ВложениеУчета',[])
+    if not isinstance(values,list) or len(values)!=1 or not isinstance(values[0],dict):
+        raise ProbeError('ACCOUNTING_ATTACHMENT_NOT_UNIQUE')
+    value=values[0]
+    if value.get('Удален')!='Нет' or value.get('Зашифрован')!='Нет':raise ProbeError('ACCOUNTING_ATTACHMENT_UNAVAILABLE')
+    if value.get('Упакован') not in ('',None,'Нет'):raise ProbeError('XML_ZIP_UNSUPPORTED')
+    file=value.get('Файл')
+    if not isinstance(file,dict) or not str(file.get('Имя','')).lower().endswith('.xml'):
+        raise ProbeError('ACCOUNTING_ATTACHMENT_NOT_XML')
+    body,meta=await download_xml(file.get('Ссылка'))
+    return {**meta,**xml_summary(body)}
 
 
 def error_summary(response):
@@ -111,7 +236,7 @@ def document_summary(doc,expected_id,include_structure=False):
     return result
 
 
-async def diagnose(day,number,read_candidates=False,include_structure=False):
+async def diagnose(day,number,read_candidates=False,include_structure=False,inspect_xml=False):
     diagnostics=[]
     original=source.saby_client._request
     async def traced(method,url,**kwargs):
@@ -139,20 +264,25 @@ async def diagnose(day,number,read_candidates=False,include_structure=False):
     source.saby_client._request=traced
     try:
         result=await source.find_receipt(day,number)
-        if read_candidates:
+        if inspect_xml and len(result.get('candidates',[]))!=1:raise ProbeError('XML_REQUIRES_ONE_EXACT_DOCUMENT')
+        if read_candidates or inspect_xml:
             candidates=result.get('candidates',[])
             if len(candidates)>5:raise ValueError('TOO_MANY_CANDIDATES')
             inspected=[]
             for candidate in candidates:
                 await asyncio.sleep(3)
                 data=await source.request(None,{'Документ':{'Идентификатор':candidate['id']}},'СБИС.ПрочитатьДокумент')
-                inspected.append(document_summary(data.get('Документ',data),candidate['id'],include_structure))
+                doc=data.get('Документ',data)
+                item=document_summary(doc,candidate['id'],include_structure)
+                if inspect_xml:item['accounting_xml']=await inspect_accounting_xml(doc)
+                inspected.append(item)
             result['inspected_candidates']=inspected
             result['selected_document_id']=None
-        return {**result,'diagnostic_revision':4,'diagnostics':diagnostics,'writes_performed':False}
+        return {**result,'diagnostic_revision':5,'diagnostics':diagnostics,'writes_performed':False}
     except Exception as exc:
         result={'status':'FAILED','complete_search':False,'writes_performed':False,
-            'diagnostic_revision':4,'error_type':type(exc).__name__,'diagnostics':diagnostics}
+            'diagnostic_revision':5,'error_type':type(exc).__name__,'diagnostics':diagnostics}
+        if isinstance(exc,ProbeError):result['error_code']=str(exc)
         if isinstance(exc,httpx.HTTPStatusError): result['http_status']=exc.response.status_code
         return result
     finally:
@@ -164,8 +294,9 @@ def main():
     p.add_argument('--date',required=True);p.add_argument('--number',required=True)
     p.add_argument('--read-candidates',action='store_true')
     p.add_argument('--structure',action='store_true')
+    p.add_argument('--inspect-accounting-xml',action='store_true')
     args=p.parse_args()
-    result=asyncio.run(diagnose(args.date,args.number,args.read_candidates,args.structure))
+    result=asyncio.run(diagnose(args.date,args.number,args.read_candidates,args.structure,args.inspect_accounting_xml))
     print(json.dumps(result,ensure_ascii=False,indent=2,default=str))
     if result.get('status')=='FAILED':raise SystemExit(1)
 
