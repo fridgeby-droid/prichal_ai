@@ -4,6 +4,7 @@ Prints stage, numeric error codes, known reason categories and field types.
 Never prints upstream free-text messages, headers, URLs or document contents.
 Revision 2 normalizes document requests to the documented JSON-RPC UTF-8 media
 type even when used with the original v0.3.54 inventory_sources module.
+Revision 3 can inspect up to five exact candidates without selecting a winner.
 """
 import argparse
 import asyncio
@@ -25,7 +26,8 @@ def error_summary(response):
     error=data.get('error')
     result['error_present']=error is not None
     result['result_present']='result' in data
-    if not isinstance(error,dict): return {**result,'reason':'UNCLASSIFIED'}
+    if not isinstance(error,dict):
+        return {**result,'reason':'NO_ERROR' if error is None and 'result' in data and response.is_success else 'UNCLASSIFIED'}
     result['error_fields']={key:type(error[key]).__name__ for key in
         ('code','message','details','data','type') if key in error}
     codes={}
@@ -56,7 +58,29 @@ def error_summary(response):
     return result
 
 
-async def diagnose(day,number):
+def structure(value,depth=0):
+    if depth>=5:return {'type':type(value).__name__}
+    if isinstance(value,dict):
+        return {'type':'dict','length':len(value),'fields':{str(k)[:80]:structure(v,depth+1) for k,v in list(value.items())[:60]}}
+    if isinstance(value,list):
+        return {'type':'list','length':len(value),'examples':[structure(v,depth+1) for v in value[:2]]}
+    return {'type':type(value).__name__}
+
+
+def document_summary(doc,expected_id):
+    if not isinstance(doc,dict) or doc.get('Идентификатор')!=expected_id:raise ValueError('RECEIPT_ID_MISMATCH')
+    if doc.get('ЧастичныеДанные')=='Да':raise ValueError('SABY_DOCUMENT_PARTIAL')
+    def fields(value,names):
+        if not isinstance(value,dict):return {}
+        return {k:str(value[k])[:200] for k in names if type(value.get(k)) in (str,int)}
+    return {'document':fields(doc,('Идентификатор','Номер','Дата','Тип','Удален')),
+        'state':fields(doc.get('Состояние'),('Код','Название')),
+        'department':fields(doc.get('Подразделение'),('Идентификатор','Название','Структура')),
+        'regulation':fields(doc.get('Регламент'),('Идентификатор','Название')),
+        'document_shape':structure(doc),'posting_confirmed':False,'store_mapping_confirmed':False}
+
+
+async def diagnose(day,number,read_candidates=False):
     diagnostics=[]
     original=source.saby_client._request
     async def traced(method,url,**kwargs):
@@ -84,10 +108,20 @@ async def diagnose(day,number):
     source.saby_client._request=traced
     try:
         result=await source.find_receipt(day,number)
-        return {**result,'diagnostic_revision':2,'diagnostics':diagnostics,'writes_performed':False}
+        if read_candidates:
+            candidates=result.get('candidates',[])
+            if len(candidates)>5:raise ValueError('TOO_MANY_CANDIDATES')
+            inspected=[]
+            for candidate in candidates:
+                await asyncio.sleep(3)
+                data=await source.request(None,{'Документ':{'Идентификатор':candidate['id']}},'СБИС.ПрочитатьДокумент')
+                inspected.append(document_summary(data.get('Документ',data),candidate['id']))
+            result['inspected_candidates']=inspected
+            result['selected_document_id']=None
+        return {**result,'diagnostic_revision':3,'diagnostics':diagnostics,'writes_performed':False}
     except Exception as exc:
         result={'status':'FAILED','complete_search':False,'writes_performed':False,
-            'diagnostic_revision':2,'error_type':type(exc).__name__,'diagnostics':diagnostics}
+            'diagnostic_revision':3,'error_type':type(exc).__name__,'diagnostics':diagnostics}
         if isinstance(exc,httpx.HTTPStatusError): result['http_status']=exc.response.status_code
         return result
     finally:
@@ -97,8 +131,9 @@ async def diagnose(day,number):
 def main():
     p=argparse.ArgumentParser()
     p.add_argument('--date',required=True);p.add_argument('--number',required=True)
+    p.add_argument('--read-candidates',action='store_true')
     args=p.parse_args()
-    result=asyncio.run(diagnose(args.date,args.number))
+    result=asyncio.run(diagnose(args.date,args.number,args.read_candidates))
     print(json.dumps(result,ensure_ascii=False,indent=2,default=str))
     if result.get('status')=='FAILED':raise SystemExit(1)
 
