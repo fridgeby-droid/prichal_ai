@@ -9,6 +9,7 @@ from app.services import period_reports as periods
 from app.services import catalog_categories as catalog_service
 from app.version import APP_VERSION
 from app.services.store_calendar import cohort
+from app.services.report_presentation import shift_label
 
 KINDS = {'summary','comparison','drivers','daynight','products','categories','comparable'}
 LATEST_SQL = '''SELECT id,status,started_at,finished_at,date_from,date_to
@@ -85,6 +86,8 @@ def dimension(a,b,cd,pd,has_previous,limit=10):
                     quantity_current=x.get('quantity') if x else None,quantity_previous=y.get('quantity') if y else None,
                     unit=(x or y).get('unit'))
         for side,source in [('current',x),('previous',y)]:
+            for field in ('returns','return_quantity','purchases'):
+                item[field+'_'+side]=source.get(field) if source else None
             quantity=source.get('quantity') if source else None
             item['average_unit_price_'+side]=dec(source['revenue'])/dec(quantity) if quantity is not None and dec(quantity) else None
         # A missing group can contribute to the observed total but is not proof of zero sales.
@@ -113,7 +116,8 @@ def payment_groups(rows,field,names):
 
 def product_groups(rows):
     return {json.dumps([r['product_key'],r['unit']],ensure_ascii=False):{
-        'name':r['name'],'revenue':r['revenue'],'quantity':r['quantity'],'unit':r['unit']} for r in rows}
+        'name':r['name'],'revenue':r['revenue'],'quantity':r['quantity'],'unit':r['unit'],
+        'returns':r.get('returns'),'return_quantity':r.get('return_quantity'),'purchases':r.get('purchases')} for r in rows}
 
 
 async def report(start,end,previous_start='',previous_end='',point_id='',kind='summary',limit=10,level='top'):
@@ -155,6 +159,9 @@ async def report(start,end,previous_start='',previous_end='',point_id='',kind='s
                 q=periods.quality(records,stores,a,z,dict(latest) if latest else None,dict(success) if success else None)
                 quality.append(matching_quality(q,a,z,cache,mark,scope))
     cd=(last-first).days+1
+    if point is not None and (any(int(r['point_id'])!=point for r in current+previous)
+                              or any(int(s['point_id'])!=point for s in stores)):
+        raise ValueError('REPORT_SCOPE_MISMATCH')
     pd=(before[1]-before[0]).days+1 if before else cd
     a,b=measures(current),measures(previous)
     metrics={key:comparison(a[key],b[key],cd,pd,bool(before and a['has_records'] and b['has_records']))
@@ -187,7 +194,8 @@ async def report(start,end,previous_start='',previous_end='',point_id='',kind='s
             assert dimensions[key]['totals']['previous']==b['revenue']
     result={'schema_version':1,'kind':kind,'date_from':start,'date_to':end,
             'previous_from':previous_start or None,'previous_to':previous_end or None,
-            'point_id':scope or None,'current_days':cd,'previous_days':pd if before else None,
+            'point_id':scope or None,'store_name':stores[0]['name'] if point is not None and stores else None,
+            'current_days':cd,'previous_days':pd if before else None,
             'equal_duration':cd==pd if before else None,'has_previous':bool(before),
             'has_current_records':a['has_records'],'has_previous_records':b['has_records'],
             'generated_at':datetime.now(timezone.utc).isoformat(),'metrics':metrics,
@@ -306,7 +314,7 @@ def change_text(change):
 def format_report(data):
     prev=data['has_previous']
     lines=[f"Отчёт {data['date_from']} → {data['date_to']} ({data['current_days']} дней)",
-           'Область: '+('точка '+data['point_id'] if data['point_id'] else 'сеть без РЦ')]
+           'Область: '+(data.get('store_name') or 'точка '+data['point_id'] if data['point_id'] else 'сеть без РЦ')]
     if prev:
         lines.append(f"База: {data['previous_from']} → {data['previous_to']} ({data['previous_days']} дней)")
         if not data['equal_duration']: lines.append('Длительность различается. Сравнивайте также среднее за календарный бизнес-день.')
@@ -327,13 +335,14 @@ def format_report(data):
             line='В среднем за день: '+(money(item['current_per_day']) if data['has_current_records'] else 'нет записей')
             if prev: line+='; база '+(money(item['previous_per_day']) if data['has_previous_records'] else 'нет записей')+'; Δ '+change_text(item['per_day_change'])
             lines.append(line)
-    labels={'stores':'Магазины — платёжная выручка','daynight':'DAY/NIGHT — по времени платежа',
+    labels={'stores':'Магазины — платёжная выручка','daynight':'Дневная смена / Ночная смена — по времени платежа',
             'categories':'Категории — суммы товарных строк','products':'Товары — суммы товарных строк'}
     for key,block in data['dimensions'].items():
         lines.append('\n'+labels[key])
         entries=[(r['name']+(f" [{r['unit']}]" if r.get('unit') else ''),r) for r in block['rows']]
         if block['omitted_groups']: entries.append((f"Остальные группы ({block['omitted_groups']})",block['other']))
         for name,row in entries:
+            if key=='daynight': name=shift_label(name)
             name=' '.join(name.split())[:160]
             line=name+': '+money(row['current'])
             if prev:
@@ -347,6 +356,9 @@ def format_report(data):
             if key=='products' and row.get('quantity_current') is not None:
                 lines.append('Количество: '+(str(row.get('quantity_previous'))+' → ' if prev else '')+str(row['quantity_current'])+
                              '; средняя цена за единицу: '+(money(row.get('average_unit_price_previous'))+' → ' if prev else '')+money(row.get('average_unit_price_current')))
+                lines.append('Возврат количества: '+str(row.get('return_quantity_current') if row.get('return_quantity_current') is not None else 'н/д')+
+                             '; возвраты: '+money(row.get('returns_current'))+' ₽; покупок с товаром: '+
+                             str(row.get('purchases_current') if row.get('purchases_current') is not None else 'н/д'))
         # Explicit decimal rounding residual, never a made-up remainder.
         for side,label in [('current','текущий')]+([('previous','база')] if prev else []):
             shown=sum((dec(r[side]).quantize(Decimal('.01'),rounding=ROUND_HALF_UP) for _,r in entries),Decimal(0))
@@ -396,7 +408,7 @@ def format_comparable(block):
     for key,label in [('stores','Магазины сопоставимой сети'),('daynight','DAY/NIGHT сопоставимой сети')]:
         lines.append(label)
         for row in block[key]['rows']:
-            lines.append(' '.join(row['name'].split())[:160]+': '+money(row['previous'])+' → '+money(row['current'])+
+            lines.append(' '.join(shift_label(row['name']).split())[:160]+': '+money(row['previous'])+' → '+money(row['current'])+
                          '; Δ '+change_text(row['change'])+'; в день Δ '+change_text(row['per_day_change']))
     row=block['excluded_revenue']
     lines.append('Остальная сеть (новые/исключённые из сравнения магазины): '+money(row['previous'])+' → '+money(row['current'])+'; Δ '+change_text(row['change']))

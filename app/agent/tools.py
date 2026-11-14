@@ -1,4 +1,5 @@
 import json
+from app.agent.report_scope import resolve_point,remember_store,validate_scope
 
 from agents.decorators import tool
 
@@ -27,7 +28,7 @@ async def get_detail_report(kind: str, date_from: str = '', date_to: str = '', p
         kind: averages (СЧ сети/точек/учёток), quantities (товары по продавцам), modifiers (только явный IsModifier=true), basket (наполняемость продажи), trend (дни/недели), clients (давность клиентов по Customer ID, НЕ карты).
         date_from: YYYY-MM-DD; обе даты пустые — вся локальная история. Для clients нижняя граница не ограничивает историю последней покупки.
         date_to: YYYY-MM-DD; для clients дата отсечения.
-        point_id: Точный ID магазина или пусто для сети.
+        point_id: Точный ID магазина или network для сети.
         seller_id: Точный ID учётки Saby или пусто; реальный сотрудник не подтверждён.
         shift: DAY/NIGHT или пусто. Для clients запрещён.
         query: Подстрока названия или ID товара для quantities; совпадения не объединяются.
@@ -38,7 +39,9 @@ async def get_detail_report(kind: str, date_from: str = '', date_to: str = '', p
         frequency_filter: clients: one_purchase, multiple_one_day, repeat_visits либо пусто.
     """
     from app.services.detail_reports import report
-    return _dump(await report(kind,date_from,date_to,point_id,seller_id,shift,query,min_days,None if max_days==-1 else max_days,offset,match,frequency_filter))
+    point_id=resolve_point(point_id)
+    result=await report(kind,date_from,date_to,point_id,seller_id,shift,query,min_days,None if max_days==-1 else max_days,offset,match,frequency_filter)
+    return _dump(validate_scope(result,point_id))
 
 
 @tool
@@ -53,7 +56,7 @@ async def get_extra_report(kind: str, start: str = '', end: str = '', previous_s
         end: Конец периода или дата отсечения карточки клиента YYYY-MM-DD.
         previous_start: Начало базы сравнения.
         previous_end: Конец базы сравнения.
-        point_id: ID точки, пусто для сети (кроме customer, где всегда сеть).
+        point_id: ID точки, network для сети (кроме customer, где всегда сеть).
         seller_id: Учётка продавца для compare.
         shift: DAY/NIGHT для compare или пусто.
         query: Название или ID товара для compare.
@@ -63,6 +66,7 @@ async def get_extra_report(kind: str, start: str = '', end: str = '', previous_s
         offset: Смещение страницы, 50 строк.
     """
     from app.services.extra_reports import product_comparison,customer_card,payment_audit
+    if kind!='customer': point_id=resolve_point(point_id)
     if kind=='compare': result=await product_comparison(start,end,previous_start,previous_end,point_id,seller_id,shift,query,match,modifiers,offset)
     elif kind=='customer': result=await customer_card(customer_id,end,offset)
     elif kind=='payments': result=await payment_audit(start,end,point_id,offset)
@@ -91,7 +95,9 @@ async def list_stores(query: str = "") -> str:
     Args:
         query: Поисковая строка; пусто — все магазины. При нескольких совпадениях уточни выбор.
     """
-    return _dump(await period_reports.stores(query))
+    result=await period_reports.stores(query)
+    remember_store(result,query)
+    return _dump(result)
 
 
 @tool
@@ -101,9 +107,11 @@ async def get_period_summary(date_from: str, date_to: str, point_id: str = "") -
     Args:
         date_from: Начало YYYY-MM-DD, включительно.
         date_to: Конец YYYY-MM-DD, включительно.
-        point_id: Точный ID из list_stores; пусто — сеть.
+        point_id: Точный ID из list_stores; network — сеть.
     """
-    return _dump(await management_reports.report(date_from,date_to,point_id=point_id,kind='summary'))
+    point_id=resolve_point(point_id)
+    result=await management_reports.report(date_from,date_to,point_id=point_id,kind='summary')
+    return _dump(validate_scope(result,point_id))
 
 
 @tool
@@ -116,9 +124,11 @@ async def compare_sales_periods(date_from: str, date_to: str, previous_from: str
         date_to: Конец текущего периода YYYY-MM-DD.
         previous_from: Начало базы сравнения YYYY-MM-DD.
         previous_to: Конец базы сравнения YYYY-MM-DD.
-        point_id: Точный ID магазина; пусто — сеть.
+        point_id: Точный ID магазина; network — сеть.
     """
-    return _dump(await management_reports.report(date_from,date_to,previous_from,previous_to,point_id,kind='comparison'))
+    point_id=resolve_point(point_id)
+    result=await management_reports.report(date_from,date_to,previous_from,previous_to,point_id,kind='comparison')
+    return _dump(validate_scope(result,point_id))
 
 
 @tool
@@ -128,9 +138,11 @@ async def get_day_night_breakdown(date_from: str, date_to: str, point_id: str = 
     Args:
         date_from: Начало YYYY-MM-DD.
         date_to: Конец YYYY-MM-DD.
-        point_id: Точный ID магазина; пусто — сеть.
+        point_id: Точный ID магазина; network — сеть.
     """
-    return _dump(await management_reports.report(date_from,date_to,point_id=point_id,kind='daynight'))
+    point_id=resolve_point(point_id)
+    result=await management_reports.report(date_from,date_to,point_id=point_id,kind='daynight')
+    return _dump(validate_scope(result,point_id))
 
 
 @tool
@@ -141,12 +153,14 @@ async def get_product_sales(date_from: str, date_to: str, point_id: str = "",
     Args:
         date_from: Начало YYYY-MM-DD.
         date_to: Конец YYYY-MM-DD.
-        point_id: Точный ID магазина; пусто — сеть.
+        point_id: Точный ID магазина; network — сеть.
         previous_from: Необязательное начало базы сравнения YYYY-MM-DD.
         previous_to: Необязательный конец базы сравнения YYYY-MM-DD; задаётся вместе с началом.
         limit: Количество строк, от 1 до 50.
     """
-    return _dump(await management_reports.report(date_from,date_to,previous_from,previous_to,point_id,kind='products',limit=limit))
+    point_id=resolve_point(point_id)
+    result=await management_reports.report(date_from,date_to,previous_from,previous_to,point_id,kind='products',limit=limit)
+    return _dump(validate_scope(result,point_id))
 
 
 @tool
@@ -158,13 +172,15 @@ async def get_category_sales(date_from: str, date_to: str, point_id: str = "",
     Args:
         date_from: Начало YYYY-MM-DD.
         date_to: Конец YYYY-MM-DD.
-        point_id: Точный ID магазина; пусто — сеть.
+        point_id: Точный ID магазина; network — сеть.
         previous_from: Начало базы сравнения; пусто — без сравнения.
         previous_to: Конец базы сравнения; задаётся вместе с предыдущим началом.
         level: top — верхний раздел, leaf — непосредственный раздел товара.
         limit: От 1 до 50 категорий.
     """
-    return _dump(await management_reports.report(date_from,date_to,previous_from,previous_to,point_id,kind='categories',level=level,limit=limit))
+    point_id=resolve_point(point_id)
+    result=await management_reports.report(date_from,date_to,previous_from,previous_to,point_id,kind='categories',level=level,limit=limit)
+    return _dump(validate_scope(result,point_id))
 
 
 @tool
@@ -174,8 +190,9 @@ async def get_load_reconcile_status(date_from: str, date_to: str, point_id: str 
     Args:
         date_from: Начало YYYY-MM-DD.
         date_to: Конец YYYY-MM-DD.
-        point_id: Точный ID магазина; пусто — сеть.
+        point_id: Точный ID магазина; network — сеть.
     """
+    point_id=resolve_point(point_id)
     return _dump(await management_reports.run_quality(date_from,date_to,point_id))
 
 
@@ -189,10 +206,12 @@ async def get_sales_drivers(date_from: str, date_to: str, previous_from: str,
         date_to: Конец текущего периода YYYY-MM-DD.
         previous_from: Начало базы сравнения YYYY-MM-DD.
         previous_to: Конец базы сравнения YYYY-MM-DD.
-        point_id: Точный ID магазина; пусто — сеть без РЦ.
+        point_id: Точный ID магазина; network — сеть без РЦ.
         limit: Число крупнейших вкладов в каждом разрезе, от 1 до 50.
     """
-    return _dump(await management_reports.report(date_from,date_to,previous_from,previous_to,point_id,kind='drivers',limit=limit))
+    point_id=resolve_point(point_id)
+    result=await management_reports.report(date_from,date_to,previous_from,previous_to,point_id,kind='drivers',limit=limit)
+    return _dump(validate_scope(result,point_id))
 
 
 @tool
@@ -387,5 +406,6 @@ async def get_advanced_report(kind: str, start: str, end: str, point_id: str = '
     Аномалии — эвристика, не доказанная причина. Страница 50 строк, offset для продолжения.
     """
     from app.services.advanced_reports import report
+    point_id=resolve_point(point_id)
     return _dump(await report(kind,start,end,point_id,previous_start,previous_end,offset,min_pairs))
 

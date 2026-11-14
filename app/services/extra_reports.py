@@ -1,4 +1,5 @@
 """Deterministic local reports: item comparisons, customer card, payment anomalies."""
+from app.services.report_presentation import clean_message
 import json
 from datetime import date,datetime
 from decimal import Decimal
@@ -42,7 +43,7 @@ async def product_comparison(start,end,previous_start,previous_end,point_id='',s
             f"доля покупок {money(r['purchase_share_percent_previous'])}% → {money(r['purchase_share_percent_current'])}%")
     next_offset=offset+50 if offset+50<len(rows) else None
     lines.extend([f'Групп: {len(rows)}; следующая страница offset={next_offset}.',NOTE])
-    return dict(rows=rows,product_totals=totals,next_offset=next_offset,report_text='\n'.join(lines),complete_source=False,
+    return dict(rows=rows,product_totals=totals,next_offset=next_offset,report_text=clean_message('\n'.join(lines)),complete_source=False,
                 date_from=start,date_to=end,previous_start=previous_start,previous_end=previous_end)
 
 
@@ -87,7 +88,7 @@ async def customer_card(customer_id,end,offset=0):
     for r in stores[offset:offset+50]: lines.append(f"{r['store_name']} [{r['point_id']}]: {r['purchases']} покупок; {money(r['amount'])} ₽; последняя {r['last_purchase']}")
     lines.extend([f'Следующая страница магазинов offset={next_offset}',NOTE])
     return dict(customer_id=str(cid),as_of=end,summary=summary,bonuses=bonuses,rows=stores,
-                next_offset=next_offset,report_text='\n'.join(lines),complete_source=False)
+                next_offset=next_offset,report_text=clean_message('\n'.join(lines)),complete_source=False)
 
 
 async def payment_audit(start,end,point_id='',offset=0):
@@ -130,4 +131,4 @@ async def payment_audit(start,end,point_id='',offset=0):
             lines.append(f"  Оплата {pay['payment_key']}: {money(pay['amount'])}; возврат={pay['is_return']}; дата={pay['business_date']}; учётка={pay['seller_id']}; источник={pay['source']}")
     next_offset=offset+50 if offset+50<len(rows) else None
     lines.extend([f'Продаж для проверки: {len(rows)}; следующая страница offset={next_offset}',NOTE])
-    return dict(rows=rows,total=len(rows),next_offset=next_offset,report_text='\n'.join(lines),complete_source=False)
+    return dict(rows=rows,total=len(rows),next_offset=next_offset,report_text=clean_message('\n'.join(lines)),complete_source=False)

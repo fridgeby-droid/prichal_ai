@@ -1,4 +1,5 @@
 """Read-only detailed reports. No Saby calls and no inferred loyalty fields."""
+from app.services.report_presentation import clean_message
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -131,7 +132,7 @@ async def report(kind,start='',end='',point_id='',seller_id='',shift='',query=''
             if first is None:
                 first=await conn.fetchval('SELECT MIN(business_date) FROM retail_sales WHERE NOT deleted AND ($1::BIGINT IS NULL OR point_id=$1)',point)
             names={str(r['point_id']):r['name'] for r in await conn.fetch('SELECT point_id,name FROM retail_stores')}
-            if first is None: return {'report_text':'Нет локальных продаж. Это не подтверждает отсутствие продаж в Saby.','complete_source':False}
+            if first is None: return {'point_id':str(point) if point else None,'report_text':'Нет локальных продаж. Это не подтверждает отсутствие продаж в Saby.','complete_source':False}
             args=(first,last,point,seller,shift)
             payment_rows=[dict(r) for r in await conn.fetch(PAYMENTS,*args)] if kind in ('averages','trend') else []
             sale_rows=[dict(r) for r in await conn.fetch(SALES,*args)] if kind in ('averages','quantities','modifiers') else []
@@ -242,5 +243,5 @@ async def report(kind,start='',end='',point_id='',seller_id='',shift='',query=''
         lines.append('Последний sync: '+str(result['last_sync']['status'])+'; старт '+str(result['last_sync']['started_at'])+'; завершён '+str(result['last_sync']['finished_at']))
         if result['last_sync']['status']=='RUNNING': lines.append('RUNNING — статус в БД; работа процесса не подтверждена.')
     lines.append('Продавец — учётка Saby, не подтверждённый фактический сотрудник. РЦ исключён. Источник — локальная БД; полнота не подтверждена, сверка этим отчётом не выполнялась. Данные предварительные.')
-    result['report_text']='\n'.join(lines)
+    result['report_text']=clean_message('\n'.join(lines))
     return result

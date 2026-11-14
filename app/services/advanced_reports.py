@@ -1,4 +1,5 @@
 """Deterministic analytics of unique local sales; no remote calls or causal claims."""
+from app.services.report_presentation import clean_message
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -346,4 +347,4 @@ def render(result):
         lines.append('Не покупали в выбранном магазине, но покупали в других: '+str(result['metadata']['absent_here_active_elsewhere']))
     lines.extend(display(r) for r in result['rows'])
     lines.extend([f"Строк: {result['total_rows']}; следующая страница offset={result['next_offset']}",NOTE])
-    return '\n'.join(lines)
+    return clean_message('\n'.join(lines))

@@ -31,7 +31,9 @@ SELECT CASE WHEN NULLIF(i.product_uuid,'') IS NOT NULL THEN 'uuid:'||i.product_u
  MAX(i.name) AS name, i.unit_name AS unit,
  SUM(CASE WHEN i.is_return THEN 0 ELSE i.quantity END) AS quantity,
  SUM(CASE WHEN i.is_return THEN 0 ELSE i.total_price END) AS revenue,
- SUM(CASE WHEN i.is_return THEN ABS(i.total_price) ELSE 0 END) AS returns
+ SUM(CASE WHEN i.is_return THEN ABS(i.total_price) ELSE 0 END) AS returns,
+ SUM(CASE WHEN i.is_return THEN ABS(i.quantity) ELSE 0 END) AS return_quantity,
+ COUNT(DISTINCT (i.point_id::TEXT || ':' || i.sale_id::TEXT)) FILTER (WHERE NOT i.is_return) AS purchases
 FROM retail_sale_items i JOIN retail_sales s
  ON s.point_id=i.point_id AND s.sale_id=i.sale_id
 WHERE NOT s.deleted AND NOT i.refused AND s.business_date BETWEEN $1 AND $2
