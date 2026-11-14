@@ -2,6 +2,8 @@
 
 Prints stage, numeric error codes, known reason categories and field types.
 Never prints upstream free-text messages, headers, URLs or document contents.
+Revision 2 normalizes document requests to the documented JSON-RPC UTF-8 media
+type even when used with the original v0.3.54 inventory_sources module.
 """
 import argparse
 import asyncio
@@ -34,6 +36,8 @@ def error_summary(response):
             if type(value) is int or isinstance(value,str) and re.fullmatch(r'-?\d{1,10}',value):
                 codes[prefix+'.'+key]=int(value)
     result['numeric_error_codes']=codes
+    result['rpc_code_category']={-32700:'PARSE_ERROR',-32600:'INVALID_REQUEST',
+        -32601:'METHOD_NOT_FOUND',-32602:'INVALID_PARAMETERS',-32603:'INTERNAL_ERROR'}.get(codes.get('error.code'),'OTHER')
     # Inspect bounded text only for known categories. Never echo arbitrary messages.
     text=' '.join(str(error.get(k) or '')[:12000] for k in ('message','details','data')).casefold()
     categories=[
@@ -42,6 +46,7 @@ def error_summary(response):
         ('AUTHENTICATION',('не авториз','неавториз','недействительный токен','invalid token','unauthorized','authentication')),
         ('METHOD_NOT_FOUND',('method not found','метод не найден','неизвестный метод')),
         ('INVALID_PARAMETERS',('invalid params','invalid parameter','неверные параметры','некорректные параметры')),
+        ('PARSE_ERROR',('parse error','ошибка разбора','ошибка парсинга','не удалось разобрать')),
         ('INTERNAL_SERVER_ERROR',('internal server error','внутренняя ошибка сервера')),
     ]
     result['reason']=next((name for name,markers in categories if any(m in text for m in markers)),'UNCLASSIFIED')
@@ -55,21 +60,34 @@ async def diagnose(day,number):
     diagnostics=[]
     original=source.saby_client._request
     async def traced(method,url,**kwargs):
+        payload={}
+        if url==source.DOC_URL:
+            payload=kwargs.pop('json',None)
+            if payload is None:
+                content=kwargs.get('content',b'{}')
+                payload=json.loads(content)
+            if not isinstance(payload,dict) or payload.get('method') not in ('СБИС.СписокДокументов','СБИС.ПрочитатьДокумент'):
+                raise ValueError('READ_ONLY_METHOD_REQUIRED')
+            headers=dict(kwargs.get('headers') or {})
+            headers={k:v for k,v in headers.items() if k.lower() not in ('content-type','content-length')}
+            headers['Content-Type']='application/json-rpc;charset=utf-8'
+            kwargs['headers']=headers
+            kwargs['content']=json.dumps(payload,ensure_ascii=False,separators=(',',':'),allow_nan=False).encode('utf-8')
         response=await original(method,url,**kwargs)
         if url==source.DOC_URL:
-            payload=kwargs.get('json',{})
             action=payload.get('method')
             stage={'СБИС.СписокДокументов':'list_receipts','СБИС.ПрочитатьДокумент':'read_receipt'}.get(action,'other')
             page=payload.get('params',{}).get('Фильтр',{}).get('Навигация',{}).get('Страница')
-            diagnostics.append({'stage':stage,'page':int(page) if str(page).isdigit() else None,**error_summary(response)})
+            diagnostics.append({'stage':stage,'page':int(page) if str(page).isdigit() else None,
+                'transport_profile':'JSON_RPC_UTF8','request_json_valid':True,**error_summary(response)})
         return response
     source.saby_client._request=traced
     try:
         result=await source.find_receipt(day,number)
-        return {**result,'diagnostics':diagnostics,'writes_performed':False}
+        return {**result,'diagnostic_revision':2,'diagnostics':diagnostics,'writes_performed':False}
     except Exception as exc:
         result={'status':'FAILED','complete_search':False,'writes_performed':False,
-            'error_type':type(exc).__name__,'diagnostics':diagnostics}
+            'diagnostic_revision':2,'error_type':type(exc).__name__,'diagnostics':diagnostics}
         if isinstance(exc,httpx.HTTPStatusError): result['http_status']=exc.response.status_code
         return result
     finally:
