@@ -18,6 +18,7 @@ from app.services.sync import sync_service
 from app.services.auto_sources import run_loop
 from app.services.storage import storage
 from app.version import APP_VERSION, BUILD_TAG
+from app.services.personal_followups import run_loop as personal_loop
 
 
 settings = get_settings()
@@ -51,14 +52,15 @@ async def lifespan(app: FastAPI):
     )
     sync_task = asyncio.create_task(auto_sync_loop())
     core_schedule_task = asyncio.create_task(schedule_loop())
+    personal_task = asyncio.create_task(personal_loop(bot))
 
     try:
         yield
     finally:
-        for task in (polling_task, sync_task, core_schedule_task):
+        for task in (polling_task, sync_task, core_schedule_task, personal_task):
             task.cancel()
 
-        for task in (polling_task, sync_task, core_schedule_task):
+        for task in (polling_task, sync_task, core_schedule_task, personal_task):
             try:
                 await task
             except asyncio.CancelledError:

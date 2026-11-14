@@ -174,7 +174,7 @@ def test_telegram_sends_actual_file(monkeypatch):
     monkeypatch.setattr(router,'_allowed',lambda m:True)
     monkeypatch.setattr(router,'ask_with_files',AsyncMock(return_value={'text':'Готово','attachments':[{'filename':'clients.csv','content':b'a;b'}]}))
     status=SimpleNamespace(edit_text=AsyncMock())
-    message=SimpleNamespace(text='Пришли файлом',chat=SimpleNamespace(id=1),from_user=SimpleNamespace(id=2),
+    message=SimpleNamespace(text='Пришли файлом',message_id=123,chat=SimpleNamespace(id=1,type='private'),from_user=SimpleNamespace(id=2),
                             message_thread_id=None,answer=AsyncMock(return_value=status),answer_document=AsyncMock())
     asyncio.run(router.ai_text(message))
     doc=message.answer_document.await_args.args[0]

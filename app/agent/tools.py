@@ -1,5 +1,5 @@
 import json
-from app.agent.report_scope import resolve_point,remember_store,validate_scope
+from app.agent.report_scope import resolve_point,remember_store,validate_scope,request_scope
 from app.agent.exports import remember as remember_report
 
 from agents.decorators import tool
@@ -54,6 +54,38 @@ async def export_last_report() -> str:
     """
     from app.agent.exports import create
     return _dump(await create())
+
+
+@tool
+async def personal_notifications(setting: str = 'status', value: str = '') -> str:
+    """Личные уведомления: status; enabled/morning/tasks_enabled со значением on/off;
+    time со значением HH:MM. Изменять только по просьбе. Получатель задан Telegram.
+    """
+    from app.services.personal_followups import configure
+    return _dump(await configure((request_scope.get() or {}).get('actor'),setting,value))
+
+
+@tool
+async def create_followup_task(point_id: str, shift: str = '', metric: str = 'revenue_per_day',
+                               after_days: int = 7, threshold_percent: int = 0) -> str:
+    """Сохранить поручение проверить изменение через N дней. Только по явному поручению.
+    point_id — найденный магазин, shift DAY/NIGHT/пусто. metric revenue_per_day,
+    checks_per_day или average_check. threshold_percent — минимальный рост процентов.
+    База — предыдущие N закрытых бизнес-дней, проверка — следующие N дней. Возвращает
+    точные периоды, due_at, ID и delivery_enabled. Не поддерживает произвольные условия.
+    """
+    from app.services.personal_followups import create_task
+    return _dump(await create_task((request_scope.get() or {}).get('actor'),resolve_point(point_id),
+                                   shift,metric,after_days,threshold_percent))
+
+
+@tool
+async def manage_followup_tasks(action: str = 'list', task_id: str = '') -> str:
+    """Свои поручения и результаты. action list/pause/resume/cancel; для изменений task_id.
+    Изменять только по просьбе пользователя. Никогда не менять задачу другого пользователя.
+    """
+    from app.services.personal_followups import tasks
+    return _dump(await tasks((request_scope.get() or {}).get('actor'),action,task_id))
 
 
 @tool

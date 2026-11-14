@@ -1820,6 +1820,63 @@ def conversation_key(message):
     return key(message.chat.id,message.from_user.id,message.message_thread_id)
 
 
+def personal_actor(message):
+    return {'user_id':message.from_user.id,'private':message.chat.type=='private',
+            'message_id':message.message_id}
+
+
+@router.message(Command('notifications'))
+async def notifications(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    from app.services.personal_followups import configure
+    args=(message.text or '').split()[1:]
+    try:
+        setting,value='status',''
+        if len(args)==1 and args[0] in ('on','off'): setting,value='enabled',args[0]
+        elif len(args)==2:
+            setting={'tasks':'tasks_enabled'}.get(args[0],args[0]);value=args[1]
+        elif args: raise ValueError('/notifications [on|off] или /notifications morning on|off, tasks on|off, time 10:00')
+        state=await configure(personal_actor(message),setting,value)
+        label=lambda x:'включено' if x else 'выключено'
+        await message.answer(f"Личные уведомления: {label(state['enabled'])}\nУтренний обзор: {label(state['morning'])} · {state['time']} (Екатеринбург)\nПроверки задач: {label(state['tasks_enabled'])}\n\n/notifications on — включить всё по настройкам\n/notifications off — приостановить отправку\n/notifications morning off — отключить обзор\n/notifications tasks off — отключить результаты задач\n/notifications time 10:00 — время обзора\n/tasks — поручения")
+    except ValueError as exc: await message.answer(str(exc))
+    except Exception:
+        logger.exception('Personal preferences failed')
+        await message.answer('Не удалось сохранить настройки. Повторите позже.')
+
+
+@router.message(Command('tasks'))
+async def followup_tasks(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    from app.services.personal_followups import tasks,local,METRICS,fmt
+    from datetime import datetime
+    args=(message.text or '').split()[1:]
+    try:
+        if args and len(args)!=2: raise ValueError('/tasks или /tasks pause|resume|cancel ID')
+        result=await tasks(personal_actor(message),args[0] if args else 'list',args[1] if args else '')
+        rows=result if isinstance(result,list) else [result]
+        if not rows:
+            await message.answer('Поручений пока нет. Например: «Через неделю проверь, улучшилась ли дневная смена Батумской».')
+            return
+        labels={'PENDING':'запланировано','PROCESSING':'проверяется','WAITING':'ждёт данных / включения отправки',
+                'PAUSED':'пауза','CANCELLED':'отменено','DONE':'завершено','SENDING':'отправляется','DELIVERY_UNKNOWN':'доставка не подтверждена'}
+        for task in rows:
+            result=task.get('result') or {}
+            text=f"Задача {task['id']} · {labels.get(task['status'],task['status'])}\n{task['store']} · "+{'DAY':'Дневная смена','NIGHT':'Ночная смена','':'Все смены'}[task['shift']]
+            text+=f"\n{METRICS[task['metric']]} · порог роста {task['threshold_percent']}%\nСрок: {local(datetime.fromisoformat(task['due_at'])):%d.%m.%Y %H:%M}\nПроверка: {task['date_from']} → {task['date_to']}"
+            if result.get('conclusion'): text+=f"\n{result['conclusion']} · {fmt(result['baseline'])} → {fmt(result['current'])}"
+            elif result.get('status')=='INSUFFICIENT_DATA': text+='\nИтог не рассчитан: недостаточно данных.'
+            await message.answer(text)
+    except ValueError as exc: await message.answer(str(exc))
+    except Exception:
+        logger.exception('Personal task operation failed')
+        await message.answer('Не удалось прочитать или изменить поручение. Повторите позже.')
+
+
 @router.message(Command('newdialog'))
 async def newdialog(message: Message) -> None:
     if not _allowed(message):
@@ -1851,7 +1908,7 @@ async def ai_text(message: Message, request_text: str = '') -> None:
 
     try:
         async with _agent_semaphore:
-            response = await ask_with_files(text,conversation_key(message))
+            response = await ask_with_files(text,conversation_key(message),personal_actor(message))
             answer = response['text']
 
         if not answer:

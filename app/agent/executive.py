@@ -8,6 +8,9 @@ from app.services.report_presentation import clean_message
 from app.agent.tools import (
     get_management_brief,
     export_last_report,
+    personal_notifications,
+    create_followup_task,
+    manage_followup_tasks,
     get_short_load_status,
     get_detail_report,
     get_extra_report,
@@ -223,6 +226,27 @@ get_short_load_status, качество периода — get_load_reconcile_st
 данных для рейтинга. Это сравнение учёток, не доказательство личной эффективности.
 Продолжения «а ночью», «тот же магазин» относятся к предыдущему запросу;
 при смене темы/неоднозначности уточняй. После /newdialog старого контекста нет.
+
+ЛИЧНЫЕ УВЕДОМЛЕНИЯ И ПОРУЧЕНИЯ:
+Настройки personal_notifications: enabled — общий выключатель, morning — обзор,
+tasks_enabled — результаты задач, time — ЧЧ:ММ по Екатеринбургу (по умолчанию 10:00).
+Меняй настройки только по явной просьбе. Все уведомления только в личный чат владельца,
+ID получателя берёт код из Telegram, не из текста пользователя. /newdialog не удаляет задачи.
+«Через неделю проверь, улучшилась ли дневная смена Батумской» — найди магазин,
+вызови create_followup_task с after_days=7, shift=DAY, metric=revenue_per_day.
+Для «улучшилась» без другого показателя используй выручку в день и явно назови этот
+критерий в ответе. Для среднего чека/числа платежей выбери соответствующий metric.
+База фиксируется кодом при создании: предыдущие N закрытых бизнес-дней, проверка —
+следующие N бизнес-дней. Не обещай иной период, чем вернул инструмент.
+Подтверди ID, магазин, смену, показатель, базовый период и местное время due_at.
+delivery_enabled=false обязательно поясни: задача сохранена, отправка выключена;
+включить /notifications on и при необходимости /notifications tasks on.
+Не называй задачу созданной без успешного ответа инструмента. Неподдерживаемый
+показатель или сложное условие — уточни, не заменяй его молча выручкой.
+manage_followup_tasks: list, pause, resume, cancel. Сначала список, если ID неизвестен;
+при неоднозначности уточни. Не отменяй и не возобновляй без явной просьбы.
+WAITING — ждём данных, DONE — результат получен, DELIVERY_UNKNOWN — доставка
+не подтверждена, автоматически повторять её нельзя. Результаты доступны в списке задач.
 """
 
 def current_instructions(context, agent):
@@ -237,6 +261,9 @@ executive_agent = Agent(
     tools=[
         get_management_brief,
         export_last_report,
+        personal_notifications,
+        create_followup_task,
+        manage_followup_tasks,
         get_short_load_status,
         get_detail_report,
         get_extra_report,
@@ -271,19 +298,20 @@ async def ask_executive_agent(text: str) -> str:
     return response['text']
 
 
-async def ask_with_files(text: str, session: str = '') -> dict:
+async def ask_with_files(text: str, session: str = '', actor: dict | None = None) -> dict:
     from app.agent import conversations
     if session:
         async with conversations.serial(session):
-            return await _ask(text,session)
-    return await _ask(text,'')
+            return await _ask(text,session,actor)
+    return await _ask(text,'',actor)
 
 
-async def _ask(text,session):
+async def _ask(text,session,actor=None):
     from app.agent import conversations
     memory=await conversations.load(session) if session else {'messages':[],'scope':{}}
     state=dict(memory['scope'])
     state['attachments']=[]
+    state['actor']=actor
     token=request_scope.set(state)
     try:
         messages=memory['messages']+[{'role':'user','content':text}]

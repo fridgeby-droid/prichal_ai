@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.49"
-BUILD_TAG = "management-assistant-memory-briefs-exports"
+APP_VERSION = "0.3.50"
+BUILD_TAG = "personal-notifications-and-followup-tasks"
