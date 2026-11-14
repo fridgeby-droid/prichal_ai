@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.52"
-BUILD_TAG = "telegram-button-menu"
+APP_VERSION = "0.3.54"
+BUILD_TAG = "inventory-observations-and-actual-costs"

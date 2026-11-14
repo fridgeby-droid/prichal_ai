@@ -107,7 +107,8 @@ def test_all_new_routes_readonly_scopes_and_render(kind,monkeypatch):
     c=C();monkeypatch.setattr(a,'pool',lambda:Pool(c))
     async def point(_): return 1
     monkeypatch.setattr(a,'point_filter',point)
-    kw={'previous_start':'2026-08-01','previous_end':'2026-08-31'} if kind=='substitution' else {}
+    kw={'previous_start':'2026-08-01','previous_end':'2026-08-31'} if kind in ('substitution','assortment_gaps','basket_change') else {}
+    if kind in ('crosssell','substitution'): kw['rules_config']={'crosssell':[],'substitution':[]}
     result=asyncio.run(a.report(kind,'2026-09-01','2026-09-30','1',**kw))
     assert result['kind']==kind and not result['complete_source']
     assert 'Полнота' in a.render(result) or 'полнота' in a.render(result)
@@ -135,6 +136,6 @@ def test_crosssell_streams_modifiers_without_money_double_count(monkeypatch):
                 {'SaleNomenclature':12,'IsModifier':True,'Nomenclature':3,'Refused':True}]})
     monkeypatch.setattr(a,'pool',lambda:Pool(C()))
     monkeypatch.setattr(b,'rules',lambda:CONFIG)
-    result=asyncio.run(a.report('crosssell','2026-09-01','2026-09-30'))
+    result=asyncio.run(a.report('crosssell','2026-09-01','2026-09-30',rules_config=CONFIG))
     assert result['rows'][0]['attachment_rate']==1
     assert result['metadata']['totals']['amount']==100

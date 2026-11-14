@@ -27,6 +27,10 @@ async def create():
         data=await report(**args,export_all=True)
         rows=[{**r,'filters':args,'basis':data.get('metadata',{}).get('basis'),
                'complete_source':False} for r in data.get('rows',[])]
+    elif saved['kind']=='inventory':
+        from app.services.inventory_reports import report
+        data=await report(**args,export_all=True)
+        rows=[{**r,'filters':args,'metadata':data['metadata'],'complete_source':False} for r in data['rows']]
     else: raise ValueError('Для этой выгрузки выберите детальный отчёт товаров, клиентов, средних чеков или аналитики.')
     content=csv_bytes(rows)
     if len(content)>45*1024*1024: raise ValueError('Сузьте период: файл больше 45 МБ.')

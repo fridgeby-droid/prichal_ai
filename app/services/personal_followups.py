@@ -17,7 +17,7 @@ from app.services.lock_guard import keep_lock_alive,release_lock
 PREFIX='assistant:personal:v1:'
 LOCK=731039
 logger=logging.getLogger(__name__)
-METRICS={'revenue_per_day':'Выручка в день','checks_per_day':'Платежей в день','average_check':'Средний чек'}
+METRICS={'revenue_per_day':'Выручка в день','checks_per_day':'Платежей в день','average_check':'Средний чек','attachment_rate':'Доля допродаж, %'}
 
 
 def now(): return datetime.now(timezone.utc)
@@ -97,29 +97,38 @@ async def metrics(first,last,point,shift):
     return aggregate(rows,first,last,shift)
 
 
-async def baseline_when_ready(first,last,point,shift,metric):
+async def baseline_when_ready(first,last,point,shift,metric,rule=None):
     try:
         if not ready(await coverage(),first,last): return None
-        base=await metrics(first,last,point,shift)
+        if metric=='attachment_rate':
+            from app.services.management_opportunities import attachment_metrics
+            base=await attachment_metrics(first,last,point,shift,rule)
+        else: base=await metrics(first,last,point,shift)
         return base if base['all_days_observed'] and base[metric] is not None else None
     except Exception:
         logger.exception('Follow-up baseline not available yet')
         return None
 
 
-async def create_task(actor,point_id,shift='',metric='revenue_per_day',after_days=7,threshold_percent=0):
+async def create_task(actor,point_id,shift='',metric='revenue_per_day',after_days=7,threshold_percent=0,rule_id='',action_note=''):
     user_id=require_actor(actor)
     if shift not in ('','DAY','NIGHT') or metric not in METRICS: raise ValueError('Неподдерживаемая смена или показатель')
     if not 1<=after_days<=90 or not 0<=threshold_percent<=1000: raise ValueError('Срок 1–90 дней; порог 0–1000%.')
+    if len(action_note)>500: raise ValueError('Описание действия — до 500 символов.')
+    rule=None
+    if metric=='attachment_rate':
+        from app.services.opportunity_rules import load
+        rule=next((r for r in (await load()).get('crosssell',[]) if r['id']==rule_id),None)
+        if not rule: raise ValueError('Сначала выберите настроенное правило допродаж.')
     await periods.point_filter(point_id)
     if not point_id: raise ValueError('Нужен конкретный магазин')
     stores=await periods.stores(point_id)
     name=next(s['name'] for s in stores['stores'] if s['point_id']==point_id)
     stamp=now();base_end=closed(stamp);base_start=base_end-timedelta(days=after_days-1)
     first=base_end+timedelta(days=1);last=base_end+timedelta(days=after_days)
-    base=await baseline_when_ready(base_start,base_end,point_id,shift,metric)
+    base=await baseline_when_ready(base_start,base_end,point_id,shift,metric,**({'rule':rule} if rule else {}))
     due=max(stamp+timedelta(days=after_days),datetime.combine(last+timedelta(days=1),datetime.min.time(),ZoneInfo(get_settings().business_tz))+timedelta(hours=get_settings().business_day_start_hour,minutes=30))
-    fingerprint=hashlib.sha256(json.dumps([actor.get('message_id'),point_id,shift,metric,after_days,threshold_percent],ensure_ascii=False).encode()).hexdigest()
+    fingerprint=hashlib.sha256(json.dumps([actor.get('message_id'),point_id,shift,metric,after_days,threshold_percent,rule_id,action_note],ensure_ascii=False).encode()).hexdigest()
     def add(state):
         for task in state['tasks'].values():
             if task.get('request_fingerprint')==fingerprint:
@@ -133,6 +142,7 @@ async def create_task(actor,point_id,shift='',metric='revenue_per_day',after_day
               'date_from':str(first),'date_to':str(last),'due_at':due.isoformat(),'next_at':(due if base else stamp).isoformat(),
               'baseline_status':'READY' if base else 'WAITING_FOR_DATA',
               'baseline_captured_at':stamp.isoformat() if base else None,
+              'rule_snapshot':rule,'action_note':action_note,'action_recorded_at':stamp.isoformat() if action_note else None,
               'created_at':stamp.isoformat(),'status':'PENDING','request_fingerprint':fingerprint}
         state['tasks'][task['id']]=task
         return {**task,'delivery_enabled':state['enabled'] and state['tasks_enabled']}
@@ -236,7 +246,10 @@ async def evaluate(job):
         return '\n'.join(lines),{'date':str(day)}
     first,last=date.fromisoformat(job['date_from']),date.fromisoformat(job['date_to'])
     if not ready(await coverage(),first,last): return None
-    current=await metrics(first,last,job['point_id'],job['shift'])
+    if job['metric']=='attachment_rate':
+        from app.services.management_opportunities import attachment_metrics
+        current=await attachment_metrics(first,last,job['point_id'],job['shift'],job['rule_snapshot'])
+    else: current=await metrics(first,last,job['point_id'],job['shift'])
     if not current['all_days_observed'] or current[job['metric']] is None: return None
     result=outcome(job,current)
     shift={'DAY':'Дневная смена','NIGHT':'Ночная смена','':'Все смены'}[job['shift']]
@@ -244,6 +257,8 @@ async def evaluate(job):
           f"База {job['baseline_from']}–{job['baseline_to']}: {fmt(result['baseline'])}\n"
           f"Проверка {first}–{last}: {fmt(result['current'])}\n"
           f"Изменение: {fmt(result['delta'])} · {fmt(result['percent'])}%\n{result['conclusion']}")
+    if job['metric']=='attachment_rate': text+='\nАбсолютное изменение доли — процентные пункты; процент роста — относительно базы.'
+    if job.get('action_note'): text+='\nДействие: '+job['action_note']+'\nСравнение до/после не доказывает эффект действия.'
     if (last-first).days+1 not in (7,14,21,28,35,42,49,56,63,70,77,84): text+='\nСостав дней недели в периодах различается.'
     return text,result
 
@@ -253,7 +268,8 @@ async def process(bot,user_id,job):
         if not job['id'].startswith('morning:'):
             if not job.get('baseline'):
                 base=await asyncio.wait_for(baseline_when_ready(date.fromisoformat(job['baseline_from']),
-                    date.fromisoformat(job['baseline_to']),job['point_id'],job['shift'],job['metric']),timeout=180)
+                    date.fromisoformat(job['baseline_to']),job['point_id'],job['shift'],job['metric'],
+                    **({'rule':job['rule_snapshot']} if job.get('rule_snapshot') else {})),timeout=180)
                 if base is not None:
                     captured=now().isoformat()
                     if not await edit(user_id,lambda s:update_job(s,job,'PROCESSING',baseline=base,

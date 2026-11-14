@@ -4,12 +4,13 @@ from collections import defaultdict, Counter
 from datetime import timedelta
 from decimal import Decimal as D
 from pathlib import Path
+from app.services import opportunity_calculations as opportunities
 
 KINDS=('crosssell','substitution','regularity','local_assortment','basket_structure',
-       'customer_moves','customer_comebacks','customer_value','concentration','seller_comparison','loyalty','traffic')
-ITEM_KINDS={'crosssell','substitution','regularity','local_assortment','basket_structure','concentration','seller_comparison'}
-HISTORY_KINDS={'customer_moves','customer_comebacks','customer_value'}
-NETWORK_KINDS={'local_assortment','customer_moves'}
+       'customer_moves','customer_comebacks','customer_value','concentration','seller_comparison','loyalty','traffic')+opportunities.KINDS
+ITEM_KINDS={'crosssell','substitution','regularity','local_assortment','basket_structure','concentration','seller_comparison','assortment_gaps','basket_change'}
+HISTORY_KINDS={'customer_moves','customer_comebacks','customer_value','customer_risk'}
+NETWORK_KINDS={'local_assortment','customer_moves','assortment_gaps'}
 RULE_PATH=Path(__file__).resolve().parents[2]/'data'/'analytics-rules.json'
 
 
@@ -31,6 +32,8 @@ def rules():
 
 
 def calculate(kind,sales,items,first,last,base_first=None,base_last=None,point=None,config=None):
+    if kind in opportunities.KINDS:
+        return opportunities.calculate(kind,sales,items,first,last,base_first,base_last,point)
     from app.services.advanced_reports import stats,ratio,dec
     current=[s for s in sales if first<=s['business_date']<=last and not s['is_return']]
     selected=[s for s in current if point is None or s['point_id']==point]
@@ -55,7 +58,20 @@ def calculate(kind,sales,items,first,last,base_first=None,base_last=None,point=N
                     eligible=[s for s in ss if rule_products(s)&a]
                     both=sum(bool(rule_products(s)&b) for s in eligible)
                     rows.append(dict(rule=rule['id'],point_id=str(pid),eligible_purchases=len(eligible),
-                        joint_purchases=both,attachment_rate=ratio(both,len(eligible))))
+                        joint_purchases=both,without_target_purchases=len(eligible)-both,attachment_rate=ratio(both,len(eligible)),dimension='store',
+                        sample_status='LOW_SAMPLE' if len(eligible)<30 else 'OBSERVED_SAMPLE'))
+                    groups=defaultdict(list)
+                    for s in ss: groups[(s.get('business_shift_type'),s['business_date'].isoweekday(),s.get('seller_id'))].append(s)
+                    for (shift,weekday,seller),part in sorted(groups.items(),key=lambda x:str(x[0])):
+                        own=[s for s in part if rule_products(s)&a]
+                        peers=[s for s in ss if s.get('business_shift_type')==shift and s['business_date'].isoweekday()==weekday and s.get('seller_id')!=seller and rule_products(s)&a]
+                        rows.append(dict(rule=rule['id'],point_id=str(pid),shift=shift,weekday=weekday,
+                            seller_id=str(seller) if seller is not None else None,seller_name=part[-1].get('seller_name'),
+                            dimension='seller_shift_weekday',eligible_purchases=len(own),joint_purchases=sum(bool(rule_products(s)&b) for s in own),
+                            without_target_purchases=sum(not bool(rule_products(s)&b) for s in own),
+                            attachment_rate=ratio(sum(bool(rule_products(s)&b) for s in own),len(own)),
+                            peer_eligible_purchases=len(peers),peer_attachment_rate=ratio(sum(bool(rule_products(s)&b) for s in peers),len(peers)),
+                            sample_status='NO_PEERS' if not peers else 'LOW_SAMPLE' if len(own)<30 or len(peers)<30 else 'OBSERVED_SAMPLE'))
             else:
                 for period,start,end in (('previous',base_first,base_last),('current',first,last)):
                     ss=[s for s in sales if start<=s['business_date']<=end and not s['is_return'] and (point is None or s['point_id']==point)]

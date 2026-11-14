@@ -17,7 +17,7 @@ from app.services import management_reports
 def _dump(data: dict | list) -> str:
     if isinstance(data,dict) and data.get('kind') in {
         'summary','comparison','daynight','products','categories','drivers','comparable',
-        'investigation','store_card','morning'}:
+        'investigation','store_card','morning','attention','basket_diagnosis'}:
         remember_report('unsupported',{'kind':data['kind'],'point_id':data.get('point_id') or ''})
     return json.dumps(data, ensure_ascii=False, default=str)
 
@@ -67,16 +67,66 @@ async def personal_notifications(setting: str = 'status', value: str = '') -> st
 
 @tool
 async def create_followup_task(point_id: str, shift: str = '', metric: str = 'revenue_per_day',
-                               after_days: int = 7, threshold_percent: int = 0) -> str:
+                               after_days: int = 7, threshold_percent: int = 0, rule_id: str = '', action_note: str = '') -> str:
     """Сохранить поручение проверить изменение через N дней. Только по явному поручению.
     point_id — найденный магазин, shift DAY/NIGHT/пусто. metric revenue_per_day,
-    checks_per_day или average_check. threshold_percent — минимальный рост процентов.
+    checks_per_day, average_check или attachment_rate (доля покупок с допродажей, %).
+    Для attachment_rate нужен rule_id из правил. action_note — фактически заявленное
+    пользователем действие, до 500 символов; сохраняется с текущим временем, не выдумывать.
+    threshold_percent — минимальный относительный рост процентов, не процентные пункты.
     База — предыдущие N закрытых бизнес-дней, проверка — следующие N дней. Возвращает
     точные периоды, due_at, ID и delivery_enabled. Не поддерживает произвольные условия.
     """
     from app.services.personal_followups import create_task
     return _dump(await create_task((request_scope.get() or {}).get('actor'),resolve_point(point_id),
-                                   shift,metric,after_days,threshold_percent))
+                                   shift,metric,after_days,threshold_percent,rule_id,action_note))
+
+
+@tool
+async def opportunity_rules(action: str = 'list', query: str = '', kind: str = 'crosssell',
+                            name: str = '', base_ids: str = '', target_ids: str = '') -> str:
+    """Правила стабильных ID: list, search (поиск названия), save (только по явному
+    подтверждению пользователя и в личном чате). kind crosssell/substitution.
+    base_ids/target_ids — разделённые запятыми id:/uuid: из поиска, не угадывать.
+    Повторное имя обновляет правило; без подтверждения не заменять. Это общие правила сети.
+    """
+    from app.services import opportunity_rules as rules
+    if action=='list': return _dump(await rules.load())
+    if action=='search': return _dump(await rules.search(query))
+    if action=='save':
+        return _dump(await rules.save((request_scope.get() or {}).get('actor'),kind,name,
+            [x.strip() for x in base_ids.split(',') if x.strip()],[x.strip() for x in target_ids.split(',') if x.strip()]))
+    raise ValueError('Действие: list/search/save')
+
+
+@tool
+async def get_opportunity_report(kind: str, start: str = '', end: str = '', point_id: str = '',
+                                  previous_start: str = '', previous_end: str = '') -> str:
+    """Сценарии attention (3 магазина для внимания), basket_diagnosis (средняя покупка,
+    состав корзины и цена/количество строк), data_sources (каких источников не хватает).
+    Для attention/basket_diagnosis нужны текущий и предыдущий периоды YYYY-MM-DD.
+    Другие сценарии get_advanced_report: crosssell/substitution, assortment_gaps,
+    customer_risk, customer_comebacks, basket_change. Выводы не доказывают причины.
+    """
+    from app.services.management_opportunities import report
+    point=resolve_point(point_id)
+    return _dump(await report(kind,start,end,point,previous_start,previous_end))
+
+
+@tool
+async def get_inventory_report(kind: str, start: str, end: str, point_id: str = '', offset: int = 0) -> str:
+    """Локальная себестоимость/маржа product_costs, наблюдения остатков stock,
+    нулевые остатки stockouts. Период YYYY-MM-DD до 93 дней. point_id либо network.
+    TotalCost фактическая, PlannedCost не используется. Маржа только при согласованной
+    налоговой базе и на покрытых строках; это не чистая прибыль. Остатки относятся
+    к конкретным моментам и складам; непрерывный перебой или поступление не выводятся
+    из разницы снимков. Отсутствие наблюдения не равно нулю. Без запросов Saby.
+    """
+    from app.services.inventory_reports import report
+    point=resolve_point(point_id)
+    result=await report(kind,start,end,point,offset)
+    remember_report('inventory',dict(kind=kind,start=start,end=end,point_id=point))
+    return _dump(validate_scope(result,point))
 
 
 @tool
@@ -474,7 +524,8 @@ async def get_advanced_report(kind: str, start: str, end: str, point_id: str = '
                               min_pairs: int = 3) -> str:
     """Локальные продажи: decomposition, hours, copurchases, customers, retention, returns, discounts, anomalies,
     crosssell, substitution, regularity, local_assortment, basket_structure, customer_moves,
-    customer_comebacks, customer_value, concentration, seller_comparison, loyalty, traffic.
+    customer_comebacks, customer_value, concentration, seller_comparison, loyalty, traffic,
+    customer_risk, assortment_gaps, basket_change. Последние два требуют previous_start/end.
 
     Даты YYYY-MM-DD. decomposition/substitution требуют previous_start/end, предшествующие текущему периоду.
     crosssell/substitution требуют настроенных правил стабильных ID; RULES_REQUIRED — не нулевые продажи.

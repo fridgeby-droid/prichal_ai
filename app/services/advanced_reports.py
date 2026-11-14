@@ -193,7 +193,7 @@ def calculate(kind, sales, items, first, last, base_first=None, base_last=None, 
     return rows, metadata
 
 
-async def report(kind, start, end, point_id='', previous_start='', previous_end='', offset=0, min_pairs=3, export_all=False):
+async def report(kind, start, end, point_id='', previous_start='', previous_end='', offset=0, min_pairs=3, export_all=False, rules_config=None):
     if kind not in KINDS or offset<0 or min_pairs<1:
         raise ValueError('Некорректный вид отчёта, offset или min_pairs')
     first,last = dates(start,end)
@@ -202,7 +202,7 @@ async def report(kind, start, end, point_id='', previous_start='', previous_end=
     point = await point_filter(point_id)
     base_first=base_last=None
     lower = first-timedelta(days=56) if kind=='anomalies' else first
-    if kind in ('decomposition','substitution'):
+    if kind in ('decomposition','substitution','assortment_gaps','basket_change'):
         base_first,base_last=dates(previous_start,previous_end)
         if base_last>=first or (base_last-base_first).days>=366:
             raise ValueError('Базовый период должен предшествовать текущему')
@@ -212,6 +212,9 @@ async def report(kind, start, end, point_id='', previous_start='', previous_end=
     if kind in ('customers','retention') or kind in insights.HISTORY_KINDS:
         lower=None
     query_point=None if kind in insights.NETWORK_KINDS else point
+    if rules_config is None and kind in ('crosssell','substitution'):
+        from app.services.opportunity_rules import load
+        rules_config=await load()
     async with pool().acquire() as conn:
         async with conn.transaction(isolation='repeatable_read',readonly=True):
             sales=[dict(r) for r in await conn.fetch('''SELECT point_id,sale_id,business_date,sale_datetime,business_shift_type,
@@ -245,7 +248,7 @@ async def report(kind, start, end, point_id='', previous_start='', previous_end=
                 for s in sales:
                     b=bonus_map.get((s['point_id'],s['sale_id']))
                     if b: s.update(bonus_response=b['response'],bonus_current=b['current'])
-            if kind in ('crosssell','seller_comparison') and insights.rules().get('crosssell'):
+            if kind in ('crosssell','seller_comparison') and (rules_config if rules_config is not None else insights.rules()).get('crosssell'):
                 from app.services.sale_tree import nodes
                 lookup={(s['point_id'],s['sale_id']):s for s in sales}
                 # Stream raw receipts, retaining only stable modifier keys, not payloads.
@@ -262,7 +265,7 @@ async def report(kind, start, end, point_id='', previous_start='', previous_end=
                     if s is not None: s['modifier_keys']=keys
             sync=await conn.fetchrow('SELECT status,started_at,finished_at FROM sync_runs ORDER BY id DESC LIMIT 1')
     if kind in insights.KINDS:
-        rows,metadata=insights.calculate(kind,sales,items,first,last,base_first,base_last,point)
+        rows,metadata=insights.calculate(kind,sales,items,first,last,base_first,base_last,point,config=rules_config)
     else:
         rows,metadata=calculate(kind,sales,items,first,last,base_first,base_last,min_pairs)
     metadata['unidentified_item_rows']=sum(i['product_key'] is None for i in items)
@@ -282,6 +285,7 @@ TITLES = dict(zip(CORE_KINDS, ('Изменение суммы продаж: по
 TITLES.update(dict(zip(insights.KINDS,('Допродажи','Динамика замещения товаров','Регулярность продаж товаров',
     'Локальный ассортимент','Структура покупок','Переходы клиентов между магазинами','Возвраты клиентов после перерыва',
     'Ценность клиентских групп','Концентрация продаж','Сопоставимые учётки и смены','Бонусы в покупках','Трафик и конверсия'))))
+TITLES.update(customer_risk='Клиенты с задержкой визита',assortment_gaps='Товары без продаж здесь',basket_change='Цена и количество товарных строк')
 LABELS = {
     'point_id':'магазин', 'seller_id':'учётка', 'purchases':'покупок', 'amount':'сумма продаж',
     'average':'средняя покупка', 'returns':'возвраты', 'previous':'база', 'current':'текущий',
@@ -336,7 +340,7 @@ def render(result):
         if isinstance(v,Decimal): return str(v.quantize(Decimal('0.0001'))).rstrip('0').rstrip('.') if v else '0'
         if isinstance(v,dict): return ', '.join(f'{LABELS.get(k,k)}: {display(x)}' for k,x in v.items())
         return values.get(str(v),str(v))
-    lines=[f"{TITLES[result['kind']]}: {result['date_from']} → {result['date_to']}",
+    lines=[f"{TITLES.get(result['kind'],result['kind'])}: {result['date_from']} → {result['date_to']}",
         'Область: '+str(result['point_id'] or 'сеть'),
         'Доли в диапазоне 0…1; 0.25 = 25%.',result['metadata'].get('interpretation','')]
     if result.get('previous_start'): lines.append(f"База: {result['previous_start']} → {result['previous_end']}")

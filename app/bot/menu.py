@@ -20,6 +20,12 @@ ITEMS={'network':['sales','comparison','drivers','morning'],'stores':['card','sa
        'sellers':['averages','sellers','quantities'],'products':['products','categories','quantities','modifiers'],
        'basket':['averages','basket','returns'],'clients':['clients','loyalty','customers'],
        'data':['status','quality']}
+ITEMS['network']+=['attention']
+ITEMS['products']+=['crosssell','assortment_gaps','substitution','rules']
+ITEMS['products']+=['product_costs','stock','stockouts']
+ITEMS['basket']+=['basket_diagnosis','basket_change']
+ITEMS['clients']+=['customer_risk','customer_comebacks','customer_value']
+ITEMS['data']+=['data_sources']
 SHIFTS={'':'Все смены','DAY':'Дневная смена','NIGHT':'Ночная смена'}
 TASK_STATES={'PENDING':'Запланировано','PROCESSING':'Проверяется','WAITING':'Ожидание данных',
              'PAUSED':'Пауза','CANCELLED':'Отменено','DONE':'Завершено','SENDING':'Отправляется','DELIVERY_UNKNOWN':'Доставка не подтверждена'}
@@ -102,6 +108,7 @@ async def task_card(message,key,s,user,task_id):
     result=t.get('result') or {}
     if result.get('conclusion'): text+=f"\n{result['conclusion']} · {followups.fmt(result['baseline'])} → {followups.fmt(result['current'])}"
     elif result.get('status')=='INSUFFICIENT_DATA': text+='\nИтог не рассчитан: недостаточно данных.'
+    if t.get('action_note'): text+='\nДействие: '+t['action_note']
     buttons=[]
     if t['status'] in ('PENDING','WAITING','PROCESSING'): buttons.append(('⏸ Пауза','taskact','pause'))
     if t['status']=='PAUSED': buttons.append(('▶️ Возобновить','taskact','resume'))
@@ -181,8 +188,8 @@ async def result(message,key,s,full=False):
 
 async def draft_confirmation(message,key,s):
     s.pop('input',None);s['page']='taskconfirm'
-    await show(message,key,s,f"Создать поручение?\n{s['store_name']} · {SHIFTS[s['shift']]}\n{followups.METRICS[s['metric']]}\nЧерез {s['days']} дней · критерий: положительный рост.\nБаза — предыдущие {s['days']} закрытых дней, проверка — следующие {s['days']} дней.",
-               [('✅ Создать задачу','createtask','')])
+    await show(message,key,s,f"Создать поручение?\n{s['store_name']} · {SHIFTS[s['shift']]}\n{followups.METRICS[s['metric']]}\nЧерез {s['days']} дней · критерий: положительный рост.\nБаза — предыдущие {s['days']} закрытых дней, проверка — следующие {s['days']} дней."+('\nПравило: '+s['rule_id'] if s['metric']=='attachment_rate' else '')+('\nДействие: '+s['action_note'] if s.get('action_note') else ''),
+               [('📝 Добавить описание действия','actionnote',''),('✅ Создать задачу','createtask','')])
 
 
 async def action(message,key,s,user,op,value):
@@ -209,11 +216,19 @@ async def action(message,key,s,user,op,value):
         s['page']='cancelconfirm'
         return await show(message,key,s,'Отменить выбранное поручение?', [('Да, отменить','taskact','cancel')])
     if op=='newtask':
+        s.pop('action_note',None);s.pop('rule_id',None)
         followups.require_actor(actor(user,message));s['task_draft']=True;s['section']='tasks'
         return await scopes(message,key,s)
     if op=='report':
         s.pop('task_draft',None);s.pop('input',None)
         s['min_days']=0;s['max_days']=None
+        if value=='rules':
+            followups.require_actor(actor(user,message))
+            return await rule_menu(message,key,s)
+        if value=='data_sources':
+            from app.services.management_opportunities import report
+            data=await report('data_sources','','')
+            return await show(message,key,s,'Источники\n\n'+'\n\n'.join(r['source']+': '+r['required'] for r in data['rows']),[])
         if value=='status':
             from app.services.load_status import status,render
             return await show(message,key,s,render(await status()),[('🔄 Обновить','report','status')])
@@ -242,10 +257,23 @@ async def action(message,key,s,user,op,value):
     if op=='queryall': s['query']='';return await periods(message,key,s)
     if op=='metric':
         s['metric']=value;s['page']='days'
+        if value=='attachment_rate':
+            from app.services.opportunity_rules import load
+            s['task_rules']=(await load()).get('crosssell',[])
+            return await show(message,key,s,'Выберите правило допродаж. Если список пуст — сначала настройте его в «Товары → Правила».',[(r['id'],'taskrule',str(i)) for i,r in enumerate(s['task_rules'])])
         return await show(message,key,s,'Через сколько дней проверить?',[(f'Через {n} дней','days',str(n)) for n in (7,14,30)]+[('Другой срок','custom','days')])
+    if op=='taskrule':
+        s['rule_id']=s['task_rules'][int(value)]['id']
+        return await show(message,key,s,'Через сколько дней проверить?',[(f'Через {n} дней','days',str(n)) for n in (7,14,30)]+[('Другой срок','custom','days')])
+    if op=='actionnote':
+        s['input']='action_note'
+        return await show(message,key,s,'Напишите, что изменили в работе магазина (до 500 символов). Запишем действие с текущей датой.',[])
     if op=='days': s['days']=int(value);return await draft_confirmation(message,key,s)
     if op=='createtask':
-        task=await followups.create_task(actor(user,message),s['point'],s['shift'],s['metric'],s['days'])
+        extra={}
+        if s['metric']=='attachment_rate': extra['rule_id']=s['rule_id']
+        if s.get('action_note'): extra['action_note']=s['action_note']
+        task=await followups.create_task(actor(user,message),s['point'],s['shift'],s['metric'],s['days'],**extra)
         s.pop('task_draft',None)
         if not task['delivery_enabled']: await message.answer('Задача сохранена, но отправка выключена. Включите личные уведомления и результаты задач в разделе «Уведомления».')
         return await task_card(message,key,s,user,task['id'])
@@ -264,6 +292,20 @@ async def action(message,key,s,user,op,value):
         await message.answer_document(BufferedInputFile(content,filename=name),caption=f'Полная выборка: {count} строк.')
         # Renew buttons without recomputing the report.
         return await show(message,key,s,'CSV отправлен с выбранными фильтрами.',[('Вернуться к отчёту','full','')])
+    if op=='rulekind':
+        s['rule_kind']=value;s['rule_base']=[];s['rule_target']=[];s['input']='rule_name'
+        return await show(message,key,s,'Название общего правила сети (до 60 символов). Совпадающее имя будет заменено только после подтверждения.',[])
+    if op=='rulepick':
+        row=s['rule_candidates'][int(value)];s['rule_'+s['rule_side']]=[row['product_key']]
+        if s['rule_side']=='base':
+            s['rule_side']='target';s['input']='rule_search'
+            return await show(message,key,s,'Теперь напишите название дополнительного товара / товара-замены.',[])
+        s.pop('input',None)
+        return await show(message,key,s,f"Сохранить правило «{s['rule_name']}»?\nОсновная группа: {', '.join(s['rule_base'])}\nЦелевая группа: {', '.join(s['rule_target'])}\nЭто общее правило сети. Совпадающее имя заменится.",[('✅ Сохранить правило','rulesave','')])
+    if op=='rulesave':
+        from app.services.opportunity_rules import save as save_rule
+        await save_rule(actor(user,message),s['rule_kind'],s['rule_name'],s['rule_base'],s['rule_target'])
+        return await rule_menu(message,key,s)
     raise ValueError('Неизвестная кнопка. Откройте главное меню.')
 
 
@@ -315,6 +357,17 @@ async def input_text(message):
     async with serial(key):
         s=await load(key);field=s.get('input');text=message.text.strip()
         try:
+            if field=='action_note':
+                if not text or len(text)>500: raise ValueError('Описание — от 1 до 500 символов.')
+                s['action_note']=text;return await draft_confirmation(message,key,s)
+            if field=='rule_name':
+                if not text or len(text)>60: raise ValueError('Название — от 1 до 60 символов.')
+                s['rule_name']=text;s['rule_side']='base';s['input']='rule_search'
+                return await show(message,key,s,'Напишите название основного товара.',[])
+            if field=='rule_search':
+                from app.services.opportunity_rules import search
+                found=await search(text);s['rule_candidates']=found['rows']
+                return await show(message,key,s,'Выберите точный товар. Если не найден — уточните название сообщением.\n'+('Показаны первые 30 совпадений.' if found['truncated'] else ''),[(r['name'][:32]+' · '+r['product_key'],'rulepick',str(i)) for i,r in enumerate(found['rows'])])
             if field=='time':
                 await followups.configure(actor(message.from_user,message),'time',text);s.pop('input',None)
                 return await settings(message,key,s,message.from_user)
@@ -334,3 +387,10 @@ async def input_text(message):
         except ValueError as exc: await show(message,key,s,str(exc),[])
         except Exception:
             logger.exception('Menu input failed');await show(message,key,s,'Не удалось выполнить действие. Вернитесь назад и повторите.',[])
+
+
+async def rule_menu(message,key,s):
+    from app.services.opportunity_rules import load
+    data=await load();s.pop('input',None);s['page']='rules'
+    text='Правила по стабильным ID товаров\n'+'\n'.join(('Допродажа' if k=='crosssell' else 'Замещение')+': '+r['id'] for k,rows in data.items() for r in rows)
+    await show(message,key,s,text,[('➕ Допродажа','rulekind','crosssell'),('➕ Возможное замещение','rulekind','substitution')])
