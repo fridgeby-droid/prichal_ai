@@ -7,7 +7,7 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
-from app.agent.executive import ask_executive_agent
+from app.agent.executive import ask_executive_agent,ask_with_files
 from app.config import get_settings
 from app.db.database import health as db_health, reset_saby_data
 from app.services.analytics import analytics_service
@@ -1815,13 +1815,35 @@ async def loadstatus(message: Message) -> None:
         await message.answer('Не удалось прочитать статус загрузки. Повторите позже.')
 
 
+def conversation_key(message):
+    from app.agent.conversations import key
+    return key(message.chat.id,message.from_user.id,message.message_thread_id)
+
+
+@router.message(Command('newdialog'))
+async def newdialog(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    from app.agent.conversations import clear,serial
+    session=conversation_key(message)
+    async with serial(session):
+        await clear(session)
+    await message.answer('Контекст очищен. Начинаем новый диалог.')
+
+
+@router.message(Command('morning'))
+async def morning(message: Message) -> None:
+    await ai_text(message,request_text='Покажи утренний обзор по сети без РЦ за последний закрытый бизнес-день.')
+
+
 @router.message(F.text)
-async def ai_text(message: Message) -> None:
+async def ai_text(message: Message, request_text: str = '') -> None:
     if not _allowed(message):
         await _reject(message)
         return
 
-    text = (message.text or "").strip()
+    text = (request_text or message.text or "").strip()
     if not text:
         return
 
@@ -1829,17 +1851,25 @@ async def ai_text(message: Message) -> None:
 
     try:
         async with _agent_semaphore:
-            answer = await ask_executive_agent(text)
+            response = await ask_with_files(text,conversation_key(message))
+            answer = response['text']
 
         if not answer:
             answer = "Не удалось сформировать ответ."
 
         # Common session presentation handles HTML and safe message splitting.
         await status.edit_text(answer)
+        from aiogram.types import BufferedInputFile
+        for attachment in response['attachments']:
+            try:
+                await message.answer_document(BufferedInputFile(attachment['content'],filename=attachment['filename']))
+            except Exception:
+                logger.exception('CSV delivery failed')
+                await message.answer('CSV подготовлен, но отправить его не удалось. Повторите просьбу о файле.')
 
     except Exception as exc:
         logger.exception("Agent request failed")
         await status.edit_text(
             "⚠️ Запрос не выполнен.\n\n"
-            f"{type(exc).__name__}: {exc}"
+            'Повторите запрос позже. Подробности сохранены в журнале.'
         )

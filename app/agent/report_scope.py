@@ -13,12 +13,15 @@ def remember_store(result,query):
 
 
 def resolve_point(value):
-    if value=='network': return ''
     state=request_scope.get()
-    if value: return value
+    if value:
+        if state is not None:
+            state['point_id']=value
+            state['ambiguous']=False
+        return '' if value=='network' else value
     if state and state.get('ambiguous'):
         raise ValueError('Уточните магазин: справочник не дал единственного совпадения.')
-    if state and state.get('point_id'): return state['point_id']
+    if state and state.get('point_id'): return '' if state['point_id']=='network' else state['point_id']
     raise ValueError('Укажите point_id из list_stores или явно network для всей сети. Пустой фильтр не разрешён.')
 
 

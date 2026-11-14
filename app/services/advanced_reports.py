@@ -215,7 +215,7 @@ async def report(kind, start, end, point_id='', previous_start='', previous_end=
     async with pool().acquire() as conn:
         async with conn.transaction(isolation='repeatable_read',readonly=True):
             sales=[dict(r) for r in await conn.fetch('''SELECT point_id,sale_id,business_date,sale_datetime,business_shift_type,
-                seller_id,customer_id,total_price,is_return,
+                seller_id,seller_name,customer_id,total_price,is_return,
                 raw_json->>'TotalDiscount' explicit_discount
                 FROM retail_sales WHERE NOT deleted AND business_date<=$2
                 AND ($1::date IS NULL OR business_date>=$1) AND ($3::bigint IS NULL OR point_id=$3)

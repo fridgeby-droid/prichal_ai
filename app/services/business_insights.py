@@ -175,12 +175,16 @@ def calculate(kind,sales,items,first,last,base_first=None,base_last=None,point=N
             peer_count=total['purchases']-own['purchases']
             basket_sizes=[len(products(s)) for s in ss]
             rows.append(dict(point_id=str(pid),weekday=weekday,shift=shift,seller_id=str(seller) if seller is not None else None,
+                seller_name=next((s.get('seller_name') for s in reversed(ss) if s.get('seller_name')),None),
                 **stats(ss),observed_days=len({s['business_date'] for s in ss}),
                 distinct_products_per_purchase=ratio(sum(basket_sizes),len(ss)),
                 peers_average_purchase=ratio(total['amount']-own['amount'],peer_count),peer_purchases=peer_count,
+                sample_status='NO_PEERS' if not peer_count else 'LOW_SAMPLE' if own['purchases']<30 or peer_count<30 or len({s['business_date'] for s in ss})<3 else 'OBSERVED_SAMPLE',
                 crosssell={r['id']:ratio(sum(bool(rule_products(s)&set(r['target'])) for s in ss if rule_products(s)&set(r['base'])),
                     sum(bool(rule_products(s)&set(r['base'])) for s in ss)) for r in configured}))
         metadata['crosssell_rules_configured']=len(configured)
+        metadata['sample_rule']={'minimum_own_purchases':30,'minimum_peer_purchases':30,'minimum_observed_days':3,
+                                 'meaning':'Heuristic display threshold, not statistical significance.'}
         metadata['interpretation']='Сравнение внутри магазина, одинаковых бизнес-дней недели и DAY/NIGHT. Остальные учётки — база сравнения. Не рейтинг сотрудников: нет фактического графика, длительности работы, трафика и контроля ассортимента.'
     elif kind=='loyalty':
         groups=defaultdict(list);visit_days=defaultdict(set)

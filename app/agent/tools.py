@@ -1,5 +1,6 @@
 import json
 from app.agent.report_scope import resolve_point,remember_store,validate_scope
+from app.agent.exports import remember as remember_report
 
 from agents.decorators import tool
 
@@ -14,6 +15,10 @@ from app.services import management_reports
 
 
 def _dump(data: dict | list) -> str:
+    if isinstance(data,dict) and data.get('kind') in {
+        'summary','comparison','daynight','products','categories','drivers','comparable',
+        'investigation','store_card','morning'}:
+        remember_report('unsupported',{'kind':data['kind'],'point_id':data.get('point_id') or ''})
     return json.dumps(data, ensure_ascii=False, default=str)
 
 
@@ -22,6 +27,33 @@ async def get_short_load_status() -> str:
     """Краткий статус загрузки, очереди бонусов и следующего запуска. Только локальная БД."""
     from app.services.load_status import status
     return _dump(await status())
+
+
+@tool
+async def get_management_brief(kind: str, start: str = '', end: str = '', point_id: str = '',
+                               previous_start: str = '', previous_end: str = '') -> str:
+    """Составные обзоры: investigation (разбор изменений), store_card (карточка магазина),
+    morning (последний закрытый бизнес-день против того же дня неделю назад),
+    sellers (учётки внутри магазина/дня недели/смены). Для morning даты задаёт код.
+    Остальные даты YYYY-MM-DD. Если база не указана, предыдущий равный период.
+    point_id из справочника либо network. Ошибки разделов явные, причины не доказаны.
+    """
+    from app.services.assistant_briefs import build
+    point=resolve_point(point_id)
+    result=await build(kind,start,end,point,previous_start,previous_end)
+    if kind=='sellers' and not result['errors']:
+        remember_report('advanced',dict(kind='seller_comparison',start=start,end=end,point_id=point))
+    return _dump(validate_scope(result,point))
+
+
+@tool
+async def export_last_report() -> str:
+    """Создать и прикрепить CSV последнего детального/расширенного отчёта с теми же фильтрами.
+    Вызывать только по просьбе пользователя выдать файл. Для другого отчёта сначала
+    вызвать get_detail_report/get_advanced_report с нужными фильтрами. Все строки, не страница.
+    """
+    from app.agent.exports import create
+    return _dump(await create())
 
 
 @tool
@@ -48,6 +80,12 @@ async def get_detail_report(kind: str, date_from: str = '', date_to: str = '', p
     from app.services.detail_reports import report
     point_id=resolve_point(point_id)
     result=await report(kind,date_from,date_to,point_id,seller_id,shift,query,min_days,None if max_days==-1 else max_days,offset,match,frequency_filter)
+    if kind in ('averages','trend','clients','quantities','modifiers'):
+        remember_report('detail',dict(kind=kind,start=date_from,end=date_to,point_id=point_id,
+            seller_id=seller_id,shift=shift,query=query,min_days=min_days,
+            max_days=None if max_days==-1 else max_days,match=match,frequency_filter=frequency_filter))
+    else:
+        remember_report('unsupported',{'kind':kind,'point_id':point_id})
     return _dump(validate_scope(result,point_id))
 
 
@@ -81,6 +119,7 @@ async def get_extra_report(kind: str, start: str = '', end: str = '', previous_s
     # Keep the complete export server-side; model receives only selected page.
     result['rows']=result['rows'][offset:offset+50]
     if 'product_totals' in result: result['product_totals']=result['product_totals'][:50]
+    remember_report('unsupported',{'kind':kind,'point_id':point_id if kind!='customer' else ''})
     return _dump(result)
 
 
@@ -414,5 +453,8 @@ async def get_advanced_report(kind: str, start: str, end: str, point_id: str = '
     """
     from app.services.advanced_reports import report
     point_id=resolve_point(point_id)
-    return _dump(await report(kind,start,end,point_id,previous_start,previous_end,offset,min_pairs))
+    result=await report(kind,start,end,point_id,previous_start,previous_end,offset,min_pairs)
+    remember_report('advanced',dict(kind=kind,start=start,end=end,point_id=point_id,
+        previous_start=previous_start,previous_end=previous_end,min_pairs=min_pairs))
+    return _dump(result)
 
