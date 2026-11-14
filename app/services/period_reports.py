@@ -8,6 +8,7 @@ from app.db.database import pool
 from app.services.analytics import analytics_service
 from app.services.daily_report import totals
 from app.services.store_calendar import opening_quality
+from app.services.store_search import search
 
 PAYMENTS_SQL = """
 SELECT p.point_id, p.business_date, p.business_shift_type AS shift_type,
@@ -60,11 +61,9 @@ async def stores(query=''):
     async with pool().acquire() as conn:
         rows = [dict(r) for r in await conn.fetch(
             'SELECT point_id,name,address,locality FROM retail_stores ORDER BY name,point_id')]
-    q = query.strip().casefold()
-    exact = [r for r in rows if str(r['point_id']) == q]
-    rows = exact or [r for r in rows if not q or q in r['name'].casefold() or q in (r['address'] or '').casefold()]
+    rows,match_type=search(rows,query)
     return {'source': 'postgresql', 'stores': [{**r, 'point_id': str(r['point_id'])} for r in rows],
-            'ambiguous': bool(q and len(rows)>1), 'excluded_points': ['23109']}
+            'ambiguous': bool(query.strip() and len(rows)>1),'match_type':match_type, 'excluded_points': ['23109']}
 
 
 async def point_filter(point_id):

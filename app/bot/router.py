@@ -1821,14 +1821,8 @@ async def ai_text(message: Message) -> None:
         if not answer:
             answer = "Не удалось сформировать ответ."
 
-        chunks = [
-            answer[i:i + 3900]
-            for i in range(0, len(answer), 3900)
-        ] or [answer]
-
-        await status.edit_text(chunks[0])
-        for chunk in chunks[1:]:
-            await message.answer(chunk)
+        # Common session presentation handles HTML and safe message splitting.
+        await status.edit_text(answer)
 
     except Exception as exc:
         logger.exception("Agent request failed")
