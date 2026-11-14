@@ -5,6 +5,7 @@ Never prints upstream free-text messages, headers, URLs or document contents.
 Revision 2 normalizes document requests to the documented JSON-RPC UTF-8 media
 type even when used with the original v0.3.54 inventory_sources module.
 Revision 3 can inspect up to five exact candidates without selecting a winner.
+Revision 4 shows compact accounting flags and attachment metadata by default.
 """
 import argparse
 import asyncio
@@ -67,20 +68,50 @@ def structure(value,depth=0):
     return {'type':type(value).__name__}
 
 
-def document_summary(doc,expected_id):
+def document_summary(doc,expected_id,include_structure=False):
     if not isinstance(doc,dict) or doc.get('Идентификатор')!=expected_id:raise ValueError('RECEIPT_ID_MISMATCH')
     if doc.get('ЧастичныеДанные')=='Да':raise ValueError('SABY_DOCUMENT_PARTIAL')
     def fields(value,names):
         if not isinstance(value,dict):return {}
         return {k:str(value[k])[:200] for k in names if type(value.get(k)) in (str,int)}
-    return {'document':fields(doc,('Идентификатор','Номер','Дата','Тип','Удален')),
+    result={'document':fields(doc,('Идентификатор','Номер','Дата','Тип','Удален')),
         'state':fields(doc.get('Состояние'),('Код','Название')),
         'department':fields(doc.get('Подразделение'),('Идентификатор','Название','Структура')),
         'regulation':fields(doc.get('Регламент'),('Идентификатор','Название')),
-        'document_shape':structure(doc),'posting_confirmed':False,'store_mapping_confirmed':False}
+        'accounting_flags':fields(doc.get('Расширение'),('Проведен','Архивирован','Очищен','ЗакрытОтИзменений')),
+        'posting_confirmed':False,'store_mapping_confirmed':False}
+    for source_key,target_key in [('ВложениеУчета','accounting_attachments'),('Вложение','attachments')]:
+        values=doc.get(source_key,[])
+        if not isinstance(values,list) or not all(isinstance(v,dict) for v in values):
+            raise ValueError('ATTACHMENTS_SHAPE_INVALID')
+        result[target_key]=[]
+        result[target_key+'_count']=len(values)
+        result[target_key+'_truncated']=len(values)>30
+        for value in values[:30]:
+            entry=fields(value,('Идентификатор','Тип','Подтип','ВерсияФормата','ПодверсияФормата',
+                'Служебный','Удален','Зашифрован','Упакован','КоличествоОшибок'))
+            file=value.get('Файл')
+            if isinstance(file,dict):
+                name=str(file.get('Имя') or '').lower()
+                extension=name.rsplit('.',1)[-1] if '.' in name else ''
+                entry['file_extension']=extension if extension in ('xml','json','zip','pdf','xls','xlsx','csv','txt') else 'other'
+                entry['download_reference_present']=bool(file.get('Ссылка'))
+                entry['hash_present']=bool(file.get('Хеш'))
+            entry['revision']=fields(value.get('Редакция'),('Номер','ДатаВремя'))
+            result[target_key].append(entry)
+    revisions=doc.get('Редакция',[])
+    if isinstance(revisions,list):
+        result['revisions']=[fields(v,('Идентификатор','Актуален','ДатаВремя')) for v in revisions[:10]]
+    links=doc.get('ДокументСледствие',[])
+    if isinstance(links,list):
+        result['related_documents']=[{'relation':fields(v,('ВидСвязи',)),
+            'document':fields(v.get('Документ'),('Идентификатор','Номер','Дата','Тип','Подтип'))}
+            for v in links[:10] if isinstance(v,dict)]
+    if include_structure:result['document_shape']=structure(doc)
+    return result
 
 
-async def diagnose(day,number,read_candidates=False):
+async def diagnose(day,number,read_candidates=False,include_structure=False):
     diagnostics=[]
     original=source.saby_client._request
     async def traced(method,url,**kwargs):
@@ -115,13 +146,13 @@ async def diagnose(day,number,read_candidates=False):
             for candidate in candidates:
                 await asyncio.sleep(3)
                 data=await source.request(None,{'Документ':{'Идентификатор':candidate['id']}},'СБИС.ПрочитатьДокумент')
-                inspected.append(document_summary(data.get('Документ',data),candidate['id']))
+                inspected.append(document_summary(data.get('Документ',data),candidate['id'],include_structure))
             result['inspected_candidates']=inspected
             result['selected_document_id']=None
-        return {**result,'diagnostic_revision':3,'diagnostics':diagnostics,'writes_performed':False}
+        return {**result,'diagnostic_revision':4,'diagnostics':diagnostics,'writes_performed':False}
     except Exception as exc:
         result={'status':'FAILED','complete_search':False,'writes_performed':False,
-            'diagnostic_revision':3,'error_type':type(exc).__name__,'diagnostics':diagnostics}
+            'diagnostic_revision':4,'error_type':type(exc).__name__,'diagnostics':diagnostics}
         if isinstance(exc,httpx.HTTPStatusError): result['http_status']=exc.response.status_code
         return result
     finally:
@@ -132,8 +163,9 @@ def main():
     p=argparse.ArgumentParser()
     p.add_argument('--date',required=True);p.add_argument('--number',required=True)
     p.add_argument('--read-candidates',action='store_true')
+    p.add_argument('--structure',action='store_true')
     args=p.parse_args()
-    result=asyncio.run(diagnose(args.date,args.number,args.read_candidates))
+    result=asyncio.run(diagnose(args.date,args.number,args.read_candidates,args.structure))
     print(json.dumps(result,ensure_ascii=False,indent=2,default=str))
     if result.get('status')=='FAILED':raise SystemExit(1)
 
