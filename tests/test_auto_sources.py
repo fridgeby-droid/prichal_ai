@@ -45,7 +45,7 @@ def test_sales_first_and_background_requires_success():
     state={'sales':{'status':'ERROR','next_run_at':(AT+timedelta(minutes=5)).isoformat()}}
     assert a.select_job(state,settings(),AT) is None
     state['sales']['status']='OK'
-    assert a.select_job(state,settings(),AT)=='bonuses_new'
+    assert a.select_job(state,settings(),AT)=='reconcile'
     assert a.select_job(state,settings(auto_sources_enabled=False),AT) is None
 
 
@@ -65,7 +65,10 @@ def test_persistent_schedule_no_duplicate_after_restart(monkeypatch):
     asyncio.run(a.tick())
     assert execute.await_count==1
     asyncio.run(a.tick())
-    assert execute.await_count==1
+    assert execute.await_count==2
+    assert [call.args[0] for call in execute.await_args_list]==['sales','reconcile']
+    asyncio.run(a.tick())
+    assert execute.await_count==2
     assert memory[a.KEY]['sales']['last_success_at']==AT.isoformat()
 
 

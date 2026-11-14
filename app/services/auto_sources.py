@@ -9,10 +9,11 @@ from app.services import saby_maintenance as maintenance, bonus_load
 from app.services.sync import sync_service
 from app.services.lock_guard import keep_lock_alive, release_lock
 from app.services.safe_errors import error_details
+from app.services import daily_reconcile
 
 KEY='maintenance:saby:scheduler:v1'
 LOCK=731034
-JOBS=('sales','bonuses_new','stores','catalog','prices','bonuses_errors')
+JOBS=('sales','reconcile','bonuses_new','stores','catalog','prices','bonuses_errors')
 logger=logging.getLogger(__name__)
 
 
@@ -25,7 +26,7 @@ def timestamp(value):
 
 
 def interval(job, settings):
-    if job=='sales': return max(5,settings.sync_interval_minutes)*60
+    if job in ('sales','reconcile'): return max(5,settings.sync_interval_minutes)*60
     if job=='bonuses_new': return max(5,settings.auto_bonus_interval_minutes)*60
     if job=='bonuses_errors': return 86400
     return max(1,settings.auto_source_interval_hours)*3600
@@ -77,6 +78,8 @@ async def execute_job(job,settings):
                 if job=='sales':
                     result=await sync_service.sync_recent(settings.sync_recent_days)
                     return {'status':'COMPLETED','result':result}
+                if job=='reconcile':
+                    return await daily_reconcile.run_next()
                 return await bonus_load.load(
                     limit=min(200,max(1,settings.auto_bonus_batch_size)) if job=='bonuses_new' else 10,
                     queue_mode='new' if job=='bonuses_new' else 'errors',max_seconds=120,coordinated=True)
@@ -116,9 +119,23 @@ async def tick():
                 if status=='PENDING':
                     state[job].update(status='PENDING',result=result)
                     delay=60
+                elif job=='reconcile' and (result.get('reconcile_status')=='REVIEW' or result.get('review')):
+                    state[job].update(status='REVIEW',result=result,error_code='RECONCILE_REVIEW')
+                    delay=interval(job,settings)
+                elif job=='reconcile' and result.get('missing_load'):
+                    state[job].update(status='WAITING_FOR_LOAD',result=result)
+                    delay=interval(job,settings)
+                elif (job=='bonuses_new' and status=='PARTIAL_ERRORS'
+                      and 0<int(result.get('errors',0))<5
+                      and int(result.get('saved',0))+int(result.get('unsupported',0))>0):
+                    state[job].update(status='PARTIAL',result=result,error_code='BONUS_ITEMS_DEFERRED',
+                                      last_progress_at=now().isoformat())
+                    delay=60
                 elif status in ('COMPLETED','BATCH_FINISHED','LOCAL_SALES_PROCESSED'):
                     state[job].update(status='OK',last_success_at=now().isoformat(),result=result)
                     delay=60 if job=='bonuses_new' and status=='BATCH_FINISHED' else interval(job,settings)
+                    if job=='sales':
+                        state.setdefault('reconcile',{})['next_run_at']=now().isoformat()
                 else:
                     state[job].update(status='ERROR',result=result,error_code=result.get('error',result.get('error_code','SOURCE_UPDATE_INCOMPLETE')))
                     delay=300 if job=='sales' else 86400 if job=='bonuses_errors' else 3600

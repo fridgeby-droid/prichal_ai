@@ -85,9 +85,15 @@ async def check():
             WHERE locktype='advisory' AND classid=0 AND objid=$1 AND objsubid=1''',LOCK)
     windows=missing_ranges(sales['date_from'],closed_day(),coverage) if sales['date_from'] else []
     bonuses=await bonus_load.plan()
+    from app.services.daily_reconcile import inspect
+    daily=await inspect()
+    daily.pop('candidates',None)
+    daily['checks']={day:{k:v for k,v in record.items() if k!='report'} for day,record in daily['checks'].items()}
     return {'mode':'LOCAL_CHECK','saby_requests_made':0,'stores':stores,'sales':sales,
             'summary':{
                 'sales_backfill':'HAS_UNCOVERED_DAYS' if windows else 'NO_UNCOVERED_CLOSED_DAYS' if sales['date_from'] else 'NO_LOCAL_SALES',
+                'closed_day_load':'NO_LOCAL_SALES' if not daily['has_local_sales'] else 'LOAD_RECORD_MISSING_OR_STALE' if daily['missing_load'] else 'LOAD_RECORDED',
+                'closed_day_reconcile':'REVIEW' if daily['review'] else 'PENDING' if daily['pending_reconcile'] or daily['missing_load'] or not daily['has_local_sales'] else 'OK',
                 'catalog_snapshot_at':catalog.get('fetched_at') if catalog else None,
                 'bonus_new_sales':bonuses.get('new_sales'),
                 'bonus_retry_errors':bonuses.get('retry_errors'),
@@ -96,6 +102,7 @@ async def check():
                 'bonus_session_present':any(r['granted'] for r in bonuses.get('loader_lock_sessions',[])),
                 'note':'Сеанс с блокировкой не доказывает продвижение. Сравните время и счётчики двух проверок; полнота источника не подтверждена.'},
             'sales_windows_without_completed_backfill':windows,
+            'daily_reconciliation':daily,
             'latest_sync':dict(sync) if sync else None,
             'catalog':{k:catalog.get(k) for k in ('fetched_at','complete_snapshot','revision')} if catalog else None,
             'prices':[dict(r) for r in prices],'maintenance':state,

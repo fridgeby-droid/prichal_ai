@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.43"
-BUILD_TAG = "automatic-source-updates"
+APP_VERSION = "0.3.44"
+BUILD_TAG = "closed-day-reconcile-and-bonus-progress"
