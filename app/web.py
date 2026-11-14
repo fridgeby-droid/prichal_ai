@@ -8,6 +8,7 @@ from aiogram import Bot, Dispatcher
 from fastapi import FastAPI
 
 from app.bot.router import router
+from app.bot.menu import router as menu_router
 from app.bot.presentation import TelegramPresentation
 from app.config import get_settings
 from app.core_api import router as core_api_router
@@ -32,6 +33,7 @@ logging.basicConfig(
 bot = Bot(settings.telegram_bot_token)
 bot.session.middleware(TelegramPresentation())
 dp = Dispatcher()
+dp.include_router(menu_router)
 dp.include_router(router)
 
 

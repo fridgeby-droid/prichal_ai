@@ -185,6 +185,7 @@ async def report(kind,start='',end='',point_id='',seller_id='',shift='',query=''
             lines.append({'network':'Сеть / выборка','stores':'Магазины','sellers':'Учётки продавцов','days':'Дни','weekdays':'Дни недели'}.get(label,label))
             for row in values:
                 title=names.get(row['id'],row['id']) if label=='stores' else seller_names.get(row['id'],row['id']) if label=='sellers' else row['id']
+                row['name']=title
                 text=f"{title} [ID {row['id']}]: {money(row['revenue'])} ₽; платёжных записей {row['checks']}; среднее по платежам {money(row['average'])} ₽; возвраты {money(row['returns'])} ₽; fallback {row['fallback']}"
                 if label=='weekdays':
                     count=sum((first+timedelta(days=i)).weekday()==int(row['id']) for i in range((last-first).days+1))

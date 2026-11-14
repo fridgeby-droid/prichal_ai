@@ -188,3 +188,51 @@ def test_morning_empty_current_records_waits(monkeypatch):
     monkeypatch.setattr(p,'coverage',AsyncMock(return_value={'has_local_sales':True}))
     monkeypatch.setattr(management_reports,'report',AsyncMock(return_value={'has_current_records':False}))
     assert asyncio.run(p.evaluate({'id':'morning:2026-11-13','day':'2026-11-13'})) is None
+
+
+def test_task_is_saved_when_baseline_not_ready(monkeypatch):
+    s=p.defaults();install_state(monkeypatch,s)
+    monkeypatch.setattr(p.periods,'point_filter',AsyncMock(return_value=5635))
+    monkeypatch.setattr(p.periods,'stores',AsyncMock(return_value={'stores':[{'point_id':'5635','name':'Батумская'}]}))
+    monkeypatch.setattr(p,'coverage',AsyncMock(return_value={'has_local_sales':False}))
+    metric_mock=AsyncMock();monkeypatch.setattr(p,'metrics',metric_mock)
+    result=asyncio.run(p.create_task({'user_id':1,'private':True,'message_id':9},'5635','DAY'))
+    assert result['id'] in s['tasks'] and result['baseline'] is None
+    assert result['baseline_status']=='WAITING_FOR_DATA'
+    assert result['due_at']!=result['next_at'] and result['next_at']==STAMP.isoformat()
+    metric_mock.assert_not_awaited()
+
+
+def test_delayed_baseline_capture_does_not_shift_deadline_or_send_early(monkeypatch):
+    s=state();j=s['tasks']['task1'];j['baseline']=None
+    j['due_at']=(STAMP+timedelta(days=7)).isoformat()
+    original={k:j[k] for k in ('due_at','date_from','date_to','baseline_from','baseline_to')}
+    install_state(monkeypatch,s);claimed=p.claim(s,STAMP)
+    reader=AsyncMock(return_value={'revenue_per_day':'125','all_days_observed':True})
+    monkeypatch.setattr(p,'baseline_when_ready',reader)
+    evaluator=AsyncMock();monkeypatch.setattr(p,'evaluate',evaluator)
+    bot=SimpleNamespace(send_message=AsyncMock())
+    asyncio.run(p.process(bot,1,claimed))
+    saved=s['tasks']['task1']
+    assert saved['baseline']['revenue_per_day']=='125' and saved['baseline_status']=='READY'
+    assert saved['status']=='PENDING' and saved['next_at']==saved['due_at']
+    assert all(saved[k]==v for k,v in original.items())
+    assert reader.await_args.args[:2]==(date(2026,11,1),date(2026,11,7))
+    bot.send_message.assert_not_awaited();evaluator.assert_not_awaited()
+
+
+def test_missing_baseline_never_evaluated_as_zero(monkeypatch):
+    s=state();s['tasks']['task1']['baseline']=None;install_state(monkeypatch,s)
+    claimed=p.claim(s,STAMP)
+    monkeypatch.setattr(p,'baseline_when_ready',AsyncMock(return_value=None))
+    evaluator=AsyncMock();monkeypatch.setattr(p,'evaluate',evaluator)
+    bot=SimpleNamespace(send_message=AsyncMock())
+    asyncio.run(p.process(bot,1,claimed))
+    assert s['tasks']['task1']['reason']=='WAITING_FOR_BASELINE'
+    assert s['tasks']['task1']['baseline'] is None
+    evaluator.assert_not_awaited();bot.send_message.assert_not_awaited()
+
+
+def test_baseline_read_failure_is_pending_not_creation_failure(monkeypatch):
+    monkeypatch.setattr(p,'coverage',AsyncMock(side_effect=TimeoutError))
+    assert asyncio.run(p.baseline_when_ready(date(2026,11,1),date(2026,11,7),'5635','DAY','revenue_per_day')) is None

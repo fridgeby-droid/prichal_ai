@@ -97,6 +97,16 @@ async def metrics(first,last,point,shift):
     return aggregate(rows,first,last,shift)
 
 
+async def baseline_when_ready(first,last,point,shift,metric):
+    try:
+        if not ready(await coverage(),first,last): return None
+        base=await metrics(first,last,point,shift)
+        return base if base['all_days_observed'] and base[metric] is not None else None
+    except Exception:
+        logger.exception('Follow-up baseline not available yet')
+        return None
+
+
 async def create_task(actor,point_id,shift='',metric='revenue_per_day',after_days=7,threshold_percent=0):
     user_id=require_actor(actor)
     if shift not in ('','DAY','NIGHT') or metric not in METRICS: raise ValueError('Неподдерживаемая смена или показатель')
@@ -107,11 +117,7 @@ async def create_task(actor,point_id,shift='',metric='revenue_per_day',after_day
     name=next(s['name'] for s in stores['stores'] if s['point_id']==point_id)
     stamp=now();base_end=closed(stamp);base_start=base_end-timedelta(days=after_days-1)
     first=base_end+timedelta(days=1);last=base_end+timedelta(days=after_days)
-    if not ready(await coverage(),base_start,base_end):
-        raise ValueError('Базовый период ещё не загружен или не сверен. Сначала дождитесь загрузки и сверки.')
-    base=await metrics(base_start,base_end,point_id,shift)
-    if not base['all_days_observed'] or base[metric] is None:
-        raise ValueError('В базовом периоде есть дни без записей выбранной смены. Нельзя зафиксировать надёжную базу.')
+    base=await baseline_when_ready(base_start,base_end,point_id,shift,metric)
     due=max(stamp+timedelta(days=after_days),datetime.combine(last+timedelta(days=1),datetime.min.time(),ZoneInfo(get_settings().business_tz))+timedelta(hours=get_settings().business_day_start_hour,minutes=30))
     fingerprint=hashlib.sha256(json.dumps([actor.get('message_id'),point_id,shift,metric,after_days,threshold_percent],ensure_ascii=False).encode()).hexdigest()
     def add(state):
@@ -124,7 +130,9 @@ async def create_task(actor,point_id,shift='',metric='revenue_per_day',after_day
         for old in terminal[:-100]: state['tasks'].pop(old['id'],None)
         task={'id':uuid4().hex[:12],'point_id':point_id,'store':name,'shift':shift,'metric':metric,
               'threshold_percent':threshold_percent,'baseline':base,'baseline_from':str(base_start),'baseline_to':str(base_end),
-              'date_from':str(first),'date_to':str(last),'due_at':due.isoformat(),'next_at':due.isoformat(),
+              'date_from':str(first),'date_to':str(last),'due_at':due.isoformat(),'next_at':(due if base else stamp).isoformat(),
+              'baseline_status':'READY' if base else 'WAITING_FOR_DATA',
+              'baseline_captured_at':stamp.isoformat() if base else None,
               'created_at':stamp.isoformat(),'status':'PENDING','request_fingerprint':fingerprint}
         state['tasks'][task['id']]=task
         return {**task,'delivery_enabled':state['enabled'] and state['tasks_enabled']}
@@ -242,14 +250,27 @@ async def evaluate(job):
 
 async def process(bot,user_id,job):
     try:
-        result=await asyncio.wait_for(evaluate(job),timeout=180)
+        if not job['id'].startswith('morning:'):
+            if not job.get('baseline'):
+                base=await asyncio.wait_for(baseline_when_ready(date.fromisoformat(job['baseline_from']),
+                    date.fromisoformat(job['baseline_to']),job['point_id'],job['shift'],job['metric']),timeout=180)
+                if base is not None:
+                    captured=now().isoformat()
+                    if not await edit(user_id,lambda s:update_job(s,job,'PROCESSING',baseline=base,
+                            baseline_status='READY',baseline_captured_at=captured)): return
+                    job.update(baseline=base,baseline_status='READY',baseline_captured_at=captured)
+            if job.get('baseline') and now()<datetime.fromisoformat(job['due_at']):
+                await edit(user_id,lambda s:update_job(s,job,'PENDING',next_at=job['due_at'],reason=None))
+                return
+        result=await asyncio.wait_for(evaluate(job),timeout=180) if job['id'].startswith('morning:') or job.get('baseline') else None
     except Exception:
         logger.exception('Personal check failed')
         result=None
     if result is None:
         delayed=now()-datetime.fromisoformat(job['due_at'])>=timedelta(days=3)
         if not delayed:
-            await edit(user_id,lambda s:update_job(s,job,'WAITING',next_at=(now()+timedelta(hours=1)).isoformat(),reason='WAITING_FOR_DATA'))
+            reason='WAITING_FOR_BASELINE' if not job['id'].startswith('morning:') and not job.get('baseline') else 'WAITING_FOR_DATA'
+            await edit(user_id,lambda s:update_job(s,job,'WAITING',next_at=(now()+timedelta(hours=1)).isoformat(),reason=reason))
             return
         result=(f"Проверка {job['id']}: за три дня не удалось получить достаточные данные. Итог не рассчитан. Проверьте /loadstatus и список /tasks.",{'status':'INSUFFICIENT_DATA'})
     text,details=result

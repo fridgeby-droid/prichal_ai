@@ -1868,6 +1868,8 @@ async def followup_tasks(message: Message) -> None:
             result=task.get('result') or {}
             text=f"Задача {task['id']} · {labels.get(task['status'],task['status'])}\n{task['store']} · "+{'DAY':'Дневная смена','NIGHT':'Ночная смена','':'Все смены'}[task['shift']]
             text+=f"\n{METRICS[task['metric']]} · порог роста {task['threshold_percent']}%\nСрок: {local(datetime.fromisoformat(task['due_at'])):%d.%m.%Y %H:%M}\nПроверка: {task['date_from']} → {task['date_to']}"
+            text+=f"\nБаза: {task['baseline_from']} → {task['baseline_to']}"
+            if not task.get('baseline'): text+='\nБаза ожидает загрузки и сверки; поручение сохранено.'
             if result.get('conclusion'): text+=f"\n{result['conclusion']} · {fmt(result['baseline'])} → {fmt(result['current'])}"
             elif result.get('status')=='INSUFFICIENT_DATA': text+='\nИтог не рассчитан: недостаточно данных.'
             await message.answer(text)
