@@ -18,6 +18,13 @@ def _dump(data: dict | list) -> str:
 
 
 @tool
+async def get_short_load_status() -> str:
+    """Краткий статус загрузки, очереди бонусов и следующего запуска. Только локальная БД."""
+    from app.services.load_status import status
+    return _dump(await status())
+
+
+@tool
 async def get_detail_report(kind: str, date_from: str = '', date_to: str = '', point_id: str = '',
                             seller_id: str = '', shift: str = '', query: str = '',
                             min_days: int = 0, max_days: int = -1, offset: int = 0,

@@ -71,3 +71,14 @@ def csv_bytes(rows):
             clean[key]=value
         writer.writerow(clean)
     return ('\ufeff'+buffer.getvalue()).encode('utf-8')
+
+
+def export_rows(data, filters=None):
+    """Flatten complete report groups; preserve denominators and filter context."""
+    rows=data.get('rows',[])
+    if data.get('kind') in ('averages','trend') or ('groups' in data and not rows):
+        rows=[{'basis':basis,'group':group,**row}
+              for basis,groups in [('payments',data.get('groups',{})),('sales',data.get('sale_averages',{}))]
+              for group,values in groups.items() for row in values]
+    return [{**row,'report_start':data.get('date_from'),'report_end':data.get('date_to'),
+             'filters':filters or {},'complete_source':data.get('complete_source',False)} for row in rows]

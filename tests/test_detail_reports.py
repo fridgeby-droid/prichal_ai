@@ -19,9 +19,9 @@ def test_client_recency_boundaries_and_frequency():
     today=date(2026,10,23)
     rows=[dict(customer_id=i,first_purchase=today-timedelta(days=i+30),last_purchase=today-timedelta(days=i),visit_days=4,purchases=5) for i in [0,29,30,59,60,89,90]]
     selected=d.recency(rows,today,30,59)
-    assert [r['customer_id'] for r in selected]==['30','59']
+    assert [r['customer_id'] for r in selected]==['59','30']
     assert all(r['segment']=='30-59' and r['mean_days_between_visits']==10 for r in selected)
-    assert [r['segment'] for r in d.recency(rows,today)]==['0-29','0-29','30-59','30-59','60-89','60-89','90+']
+    assert [r['segment'] for r in d.recency(rows,today)]==['90+','60-89','60-89','30-59','30-59','0-29','0-29']
 
 
 def test_diagnostic_no_card_phone_name_or_arbitrary_keys():

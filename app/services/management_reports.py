@@ -86,12 +86,17 @@ def dimension(a,b,cd,pd,has_previous,limit=10):
                     quantity_current=x.get('quantity') if x else None,quantity_previous=y.get('quantity') if y else None,
                     unit=(x or y).get('unit'))
         for side,source in [('current',x),('previous',y)]:
-            for field in ('returns','return_quantity','purchases'):
+            for field in ('returns','return_quantity','purchases','checks','average'):
                 item[field+'_'+side]=source.get(field) if source else None
+            checks=source.get('checks') if source else None
+            item['checks_per_day_'+side]=dec(checks)/(cd if side=='current' else pd) if checks is not None else None
             quantity=source.get('quantity') if source else None
             item['average_unit_price_'+side]=dec(source['revenue'])/dec(quantity) if quantity is not None and dec(quantity) else None
         # A missing group can contribute to the observed total but is not proof of zero sales.
         item['observation_warning']=has_previous and (x is None or y is None)
+        qa,qb=item['quantity_current'],item['quantity_previous']
+        item['quantity_delta']=qa-qb if has_previous and qa is not None and qb is not None else None
+        item['quantity_delta_status']='AVAILABLE' if item['quantity_delta'] is not None else 'NOT_COMPARABLE'
         item['change_percent']=item['change']['percent'] if item['change'] and x and y else None
         item['contribution_percent_of_total_change']=(item['change']['absolute']/total['change']['absolute']*100
             if item['change'] and total['change']['absolute'] else None)
@@ -111,7 +116,7 @@ def payment_groups(rows,field,names):
     values=defaultdict(list)
     for r in rows:
         values[str(r[field] or 'UNKNOWN')].append(r)
-    return {key:{'name':names.get(key,key),'revenue':measures(part)['revenue']} for key,part in values.items()}
+    return {key:{'name':names.get(key,key),**measures(part)} for key,part in values.items()}
 
 
 def product_groups(rows):

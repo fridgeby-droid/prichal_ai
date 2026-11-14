@@ -1621,12 +1621,12 @@ async def detail_summary(message: Message) -> None:
         kind={'avgcheck':'averages','itemqty':'quantities','modifiers':'modifiers','basket':'basket','trend':'trend','clients':'clients'}[command]
         csv_export=options.pop('csv','false')
         if csv_export not in ('true','false'): raise ValueError('csv=true или csv=false')
-        if csv_export=='true' and kind not in ('quantities','modifiers','clients'): raise ValueError('CSV: itemqty, modifiers, clients')
+        if csv_export=='true' and kind not in ('quantities','modifiers','clients','averages','trend'): raise ValueError('CSV: avgcheck, trend, itemqty, modifiers, clients')
         data=await report(kind,start,end,**options,export_all=csv_export=='true')
         if csv_export=='true':
             from aiogram.types import BufferedInputFile
-            from app.services.report_helpers import csv_bytes
-            rows=[{**r,'report_start':data.get('date_from'),'report_end':data.get('date_to'),'complete_source':False} for r in data.get('rows',[])]
+            from app.services.report_helpers import csv_bytes,export_rows
+            rows=export_rows(data,options)
             content=csv_bytes(rows)
             if len(content)>45*1024*1024: raise ValueError('CSV слишком большой; сузьте период или магазин')
             await message.answer_document(BufferedInputFile(content,filename=f'{kind}.csv'),caption=f'Полный список: {len(rows)} строк. Локальные данные; полнота Saby не подтверждена.')
@@ -1800,6 +1800,19 @@ async def core_schedule_report(message: Message) -> None:
     except Exception:
         logger.exception('Core schedule report failed')
         await message.answer('Не удалось прочитать график Core. Проверьте настройки и журнал приложения.')
+
+
+@router.message(Command('loadstatus'))
+async def loadstatus(message: Message) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    from app.services.load_status import status,render
+    try:
+        await message.answer(render(await status()))
+    except Exception:
+        logger.exception('Load status failed')
+        await message.answer('Не удалось прочитать статус загрузки. Повторите позже.')
 
 
 @router.message(F.text)

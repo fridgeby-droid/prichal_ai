@@ -107,6 +107,23 @@ def recency(rows, as_of, minimum=0, maximum=None):
         result.append({**dict(row),'customer_id':str(row['customer_id']),'days_since_purchase':age,
                        'segment':'0-29' if age<30 else '30-59' if age<60 else '60-89' if age<90 else '90+',
                        'mean_days_between_visits':Decimal(gap)/(row['visit_days']-1) if row['visit_days']>1 else None})
+    return sorted(result,key=lambda r:(-r['days_since_purchase'],int(r['customer_id'])))
+
+
+def weeks(rows, first, last):
+    result=[]
+    cursor=first
+    while cursor<=last:
+        end=min(last,cursor+timedelta(days=6-cursor.weekday()))
+        count=(end-cursor).days+1
+        selected=[r for r in rows if cursor<=r['business_date']<=end]
+        total=sums(selected)
+        result.append({'id':str(cursor),'date_from':str(cursor),'date_to':str(end),
+                       'calendar_days':count,'partial_week':count!=7,
+                       'observed_days':len({r['business_date'] for r in selected}),
+                       **total,'revenue_per_calendar_day':total['revenue']/count if selected else None,
+                       'checks_per_calendar_day':Decimal(total['checks'])/count if selected else None})
+        cursor=end+timedelta(days=1)
     return result
 
 
@@ -161,7 +178,8 @@ async def report(kind,start='',end='',point_id='',seller_id='',shift='',query=''
         seller_names={str(r['seller_id']):r['seller_name'] for r in payment_rows if r['seller_id'] is not None}
         if kind=='trend':
             groups={'days':grouped(payment_rows,lambda r:r['business_date'].isoformat()),
-                    'weekdays':grouped(payment_rows,lambda r:str(r['business_date'].weekday()))}
+                    'weekdays':grouped(payment_rows,lambda r:str(r['business_date'].weekday())),
+                    'weeks':weeks(payment_rows,first,last)}
         result['groups']=groups
         for label, values in groups.items():
             lines.append({'network':'Сеть / выборка','stores':'Магазины','sellers':'Учётки продавцов','days':'Дни','weekdays':'Дни недели'}.get(label,label))
@@ -174,6 +192,10 @@ async def report(kind,start='',end='',point_id='',seller_id='',shift='',query=''
                     row['revenue_per_calendar_day']=row['revenue']/count
                     text+=f"; календарных дней {count}; в день {money(row['revenue_per_calendar_day'])} ₽ (ПН=0)"
                 lines.append(text)
+                if label=='weeks':
+                    lines.append(f"{row['date_from']} → {row['date_to']}: {row['calendar_days']} дней; "
+                                 f"{'неполная неделя; ' if row['partial_week'] else ''}"
+                                 f"выручка/день {money(row['revenue_per_calendar_day'])}; платежей/день {money(row['checks_per_calendar_day'])}")
         lines.append('СЧ = невозвратная платёжная сумма / число невозвратных платёжных записей. Это не доказанное число уникальных фискальных чеков. Дни без строк не означают нулевые продажи.')
         if kind=='averages':
             result['sale_averages']={'network':[{'id':'Сеть/выборка',**sums(sale_rows)}],
@@ -228,6 +250,7 @@ async def report(kind,start='',end='',point_id='',seller_id='',shift='',query=''
         result['frequency_groups']={key:sum(frequency(r)==key for r in selected) for key in ('one_purchase','multiple_one_day','repeat_visits')}
         if frequency_filter: selected=[r for r in selected if frequency(r)==frequency_filter]
         result['total_clients']=len(client_rows)
+        result['sort_order']='DAYS_SINCE_PURCHASE_DESC_CUSTOMER_ID_ASC'
         result['selected_clients']=len(selected)
         result['rows']=selected if export_all else selected[offset:offset+50]
         result['next_offset']=offset+50 if not export_all and offset+50<len(selected) else None
