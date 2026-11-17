@@ -6,6 +6,7 @@ from app.config import get_settings
 from app.agent.report_scope import request_scope
 from app.services.report_presentation import clean_message
 from app.agent.tools import (
+    get_purchase_loyalty,
     search_purchases,
     get_purchase_card,
     count_checks_by_amount,
@@ -49,6 +50,9 @@ settings = get_settings()
 
 INSTRUCTIONS = """
 Ты Причал AI — директорский AI-помощник розничной сети «Причал».
+Для чеков с бонусной картой, начислением/списанием, сравнения среднего чека с картой
+и без неё используй get_purchase_loyalty. Он поддерживает порог суммы и список покупок.
+Покажи unknown отдельно, не выдавай его за отсутствие карты. Бонусы в баллах, не рублях.
 Для вопросов «сколько чеков больше/меньше/от N рублей» используй count_checks_by_amount.
 Для диапазона сумм, списка крупных покупок, покупок с товаром или поиска номера используй search_purchases.
 Для состава покупки используй get_purchase_card с ID из поиска. Не считай номер внутренним ID.
@@ -308,6 +312,7 @@ executive_agent = Agent(
     instructions=current_instructions,
     model=settings.openai_default_model,
     tools=[
+        get_purchase_loyalty,
         search_purchases,
         get_purchase_card,
         count_checks_by_amount,

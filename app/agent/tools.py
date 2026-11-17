@@ -157,6 +157,27 @@ async def count_checks_by_amount(date_from: str, date_to: str, amount: str = '50
 
 
 @tool
+async def get_purchase_loyalty(date_from: str, date_to: str, point_id: str = '',
+                                amount: str = '', comparison: str = 'gt', loyalty: str = 'all',
+                                operation: str = 'all', seller_id: str = '', shift: str = '', offset: int = 0) -> str:
+    """Покупки с бонусной картой/без карты, суммы, средние, доли, начисления и списания.
+    Даты YYYY-MM-DD включительно, до 92 дней; point_id точный ID или network.
+    amount порог рублей, пусто без порога; comparison gt/gte/lt/lte/eq.
+    loyalty all/with_card/without_card/unknown. operation all/accrual/debit:
+    accrual — известные положительные бонусы К начислению, debit — списания.
+    seller_id учётка Saby; shift DAY/NIGHT или пусто. offset страница по 20 покупок.
+    Отдельно возвращает группы карт, выбранную группу и список покупок для карточки.
+    Сколько чеков больше 500 с картой: amount=500, comparison=gt, loyalty=with_card.
+    Не исключай unknown из знаменателя долей. Ошибка бонусов не означает отсутствие карты.
+    """
+    from app.services.purchase_loyalty import report
+    point_id=resolve_point(point_id)
+    result=await report(date_from,date_to,point_id,amount,comparison,loyalty,operation,seller_id,shift,offset)
+    remember_report('unsupported',{'kind':'purchase_loyalty','point_id':point_id})
+    return _dump(validate_scope(result,point_id))
+
+
+@tool
 async def search_purchases(date_from: str, date_to: str, point_id: str = '',
                            minimum: str = '', maximum: str = '', seller_id: str = '',
                            shift: str = '', product: str = '', sale_number: str = '',
