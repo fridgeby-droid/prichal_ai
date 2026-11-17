@@ -139,6 +139,61 @@ async def manage_followup_tasks(action: str = 'list', task_id: str = '') -> str:
 
 
 @tool
+async def count_checks_by_amount(date_from: str, date_to: str, amount: str = '500',
+                                 comparison: str = 'gt', point_id: str = '') -> str:
+    """Количество покупок по сумме, например чеки больше 500 рублей по всем магазинам.
+    date_from/date_to: YYYY-MM-DD включительно, до 92 дней.
+    amount: порог в рублях строкой. comparison: gt строго больше, gte не меньше,
+    lt строго меньше, lte не больше, eq ровно. Больше 500 исключает ровно 500.
+    point_id: точный ID магазина или network для сети. РЦ исключён.
+    Считает уникальные продажи по TotalPrice, не товарные строки и не платёжные записи.
+    Возвращает общий итог и разбивку по магазинам. Нет записей не означает ноль продаж.
+    """
+    from app.services.check_amounts import report
+    point_id = resolve_point(point_id)
+    result = await report(date_from, date_to, amount, comparison, point_id)
+    remember_report('unsupported', {'kind': 'check_amounts', 'point_id': point_id})
+    return _dump(validate_scope(result, point_id))
+
+
+@tool
+async def search_purchases(date_from: str, date_to: str, point_id: str = '',
+                           minimum: str = '', maximum: str = '', seller_id: str = '',
+                           shift: str = '', product: str = '', sale_number: str = '',
+                           date_basis: str = 'business', returns: bool = False,
+                           order: str = 'amount_desc', offset: int = 0, limit: int = 20) -> str:
+    """Поиск отдельных покупок/чеков, диапазоны сумм, топ крупных покупок, покупки с товаром.
+    Даты YYYY-MM-DD до 92 дней. minimum/maximum в рублях ВКЛЮЧИТЕЛЬНО, пусто без границы.
+    point_id точный ID или network. seller_id — учётка Saby. shift DAY/NIGHT или пусто.
+    product — подстрока товара (обычные товарные строки, не поиск модификаторов).
+    sale_number — номер продажи, НЕ внутренний sale_id. Для номера используйте calendar
+    и дату пользователя; business — бизнес-день 08:00–08:00 для аналитики.
+    returns=true только возвраты, false только покупки. order amount_desc/amount_asc/recent.
+    limit 1–50, offset следующая страница. total_matches — все совпадения, rows — страница.
+    При совпадении номера нескольких продаж покажи кандидатов, не выбирай сам.
+    """
+    from app.services.check_details import search
+    point_id=resolve_point(point_id)
+    result=await search(date_from,date_to,point_id,minimum,maximum,seller_id,shift,
+                        product,sale_number,date_basis,returns,order,offset,limit)
+    remember_report('unsupported',{'kind':'purchases','point_id':point_id})
+    return _dump(validate_scope(result,point_id))
+
+
+@tool
+async def get_purchase_card(point_id: str, sale_id: str, offset: int = 0) -> str:
+    """Карточка точной покупки: магазин, время, сумма, учётка, товары, оплаты, возвраты.
+    point_id и внутренний sale_id бери из search_purchases, не подставляй номер чека как ID.
+    По 50 товарных/платёжных строк; next_offset для продолжения. Не складывай их суммы.
+    """
+    from app.services.check_details import card
+    point_id=resolve_point(point_id)
+    result=await card(point_id,sale_id,offset)
+    remember_report('unsupported',{'kind':'purchase_card','point_id':point_id})
+    return _dump(validate_scope(result,point_id))
+
+
+@tool
 async def get_detail_report(kind: str, date_from: str = '', date_to: str = '', point_id: str = '',
                             seller_id: str = '', shift: str = '', query: str = '',
                             min_days: int = 0, max_days: int = -1, offset: int = 0,

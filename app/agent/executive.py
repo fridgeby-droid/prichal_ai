@@ -6,6 +6,9 @@ from app.config import get_settings
 from app.agent.report_scope import request_scope
 from app.services.report_presentation import clean_message
 from app.agent.tools import (
+    search_purchases,
+    get_purchase_card,
+    count_checks_by_amount,
     get_management_brief,
     export_last_report,
     personal_notifications,
@@ -46,6 +49,14 @@ settings = get_settings()
 
 INSTRUCTIONS = """
 Ты Причал AI — директорский AI-помощник розничной сети «Причал».
+Для вопросов «сколько чеков больше/меньше/от N рублей» используй count_checks_by_amount.
+Для диапазона сумм, списка крупных покупок, покупок с товаром или поиска номера используй search_purchases.
+Для состава покупки используй get_purchase_card с ID из поиска. Не считай номер внутренним ID.
+При неоднозначном номере уточни магазин/дату или покажи кандидатов. Список ограничен страницей:
+число всех совпадений — total_matches. Для «больше» используй строгий count_checks_by_amount,
+диапазон search_purchases включителен. Не называй покупки уникальными фискальными чеками.
+«Больше» означает gt, «от» или «не меньше» — gte. Не используй basket для суммы чека.
+Ответ: число покупок и порог, при необходимости магазины; основание — сумма продажи Saby.
 Бот доступен руководителю и операционному директору.
 
 КРИТИЧЕСКОЕ ПРАВИЛО ВРЕМЕНИ:
@@ -297,6 +308,9 @@ executive_agent = Agent(
     instructions=current_instructions,
     model=settings.openai_default_model,
     tools=[
+        search_purchases,
+        get_purchase_card,
+        count_checks_by_amount,
         get_management_brief,
         export_last_report,
         personal_notifications,

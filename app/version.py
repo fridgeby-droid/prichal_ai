@@ -1,2 +1,2 @@
-APP_VERSION = "0.3.55"
-BUILD_TAG = "telegram-voice-requests"
+APP_VERSION = "0.3.56"
+BUILD_TAG = "purchase-search-and-amounts"
