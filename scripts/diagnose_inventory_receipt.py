@@ -117,7 +117,25 @@ def xml_summary(body):
             if len(products)<5:
                 safe={k:v for k,v in attrs.items() if k in numeric_fields and re.fullmatch(r'-?\d{1,20}(?:[.,]\d{1,10})?',v)}
                 safe.update({k:v[:160] for k,v in attrs.items() if k in identity_fields or k=='НаимТов'})
-                products.append({'path':path,'fields':safe,'attribute_names':sorted(attrs)})
+                safe.update({k:v[:80] for k,v in attrs.items() if k in ('НаимЕдИзм','НалСт')})
+                nested=[]
+                for child in node.iter():
+                    if child is node:continue
+                    child_attrs={local(k):v for k,v in child.attrib.items()}
+                    codes={k:v[:160] for k,v in child_attrs.items() if k in identity_fields
+                           and re.fullmatch(r'[\w. /:-]{1,160}',v)}
+                    label=child_attrs.get('Идентиф','')
+                    # Show auxiliary field names to discover semantics; values only for
+                    # explicit nomenclature identities, never arbitrary additional data.
+                    allowed={'НоменклатураИдентификатор','НоменклатураКод','НоменклатураUUID',
+                             'Nomenclature','NomenclatureUUID','КодТов','АртикулТов'}
+                    if label in allowed:
+                        val=child_attrs.get('Значен','')
+                        if re.fullmatch(r'[\w. /:-]{1,160}',val):codes['Значен']=val
+                    if (codes or label) and len(nested)<20:
+                        nested.append({'tag':local(child.tag),'label':label[:100] or None,'fields':codes})
+                products.append({'path':path,'fields':safe,'attribute_names':sorted(attrs),
+                                 'nested_identity_candidates':nested})
         for child in node:walk(child,path)
     walk(root)
     return {'root':local(root.tag),'schema_paths':[{**r,'attributes':sorted(r['attributes'])} for r in shape.values()],
@@ -278,10 +296,10 @@ async def diagnose(day,number,read_candidates=False,include_structure=False,insp
                 inspected.append(item)
             result['inspected_candidates']=inspected
             result['selected_document_id']=None
-        return {**result,'diagnostic_revision':5,'diagnostics':diagnostics,'writes_performed':False}
+        return {**result,'diagnostic_revision':6,'diagnostics':diagnostics,'writes_performed':False}
     except Exception as exc:
         result={'status':'FAILED','complete_search':False,'writes_performed':False,
-            'diagnostic_revision':5,'error_type':type(exc).__name__,'diagnostics':diagnostics}
+            'diagnostic_revision':6,'error_type':type(exc).__name__,'diagnostics':diagnostics}
         if isinstance(exc,ProbeError):result['error_code']=str(exc)
         if isinstance(exc,httpx.HTTPStatusError): result['http_status']=exc.response.status_code
         return result
